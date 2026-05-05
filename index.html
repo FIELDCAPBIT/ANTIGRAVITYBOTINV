@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="AlphaFundamental — Motor de Análisis Profesional de Value Investing. Análisis fundamental profundo, scoring y tesis de inversión para 100 acciones US.">
+  <title>AlphaFundamental — Value Investing Analysis</title>
+  <link rel="stylesheet" href="css/styles.css?v=4">
+  <link rel="stylesheet" href="css/dashboard.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
+</head>
+<body>
+  <div class="bg-mesh"></div>
+  <div class="app-container">
+    <header class="header">
+      <div class="logo-area">
+        <div class="logo-icon">α</div>
+        <div class="logo-text">Alpha<span>Fundamental</span></div>
+      </div>
+      <nav class="nav-tabs">
+        <a href="/dashboard" class="nav-tab" id="nav-dashboard">📊 Dashboard</a>
+        <a href="/" class="nav-tab active" id="nav-analysis">🔍 Análisis Individual</a>
+      </nav>
+    </header>
+
+    <section class="hero">
+      <h1 class="hero-title">Análisis Fundamental<br>Profundo en Segundos</h1>
+      <p class="hero-sub">Introduce un ticker de nuestro universo curado de 100 acciones US. Obtén un análisis fundamental institucional completo en 8 secciones.</p>
+      <div class="search-wrap">
+        <input type="text" class="search-input" id="search-input" placeholder="Introduce ticker (ej. AAPL, MSFT, V...)" autocomplete="off" spellcheck="false">
+        <button class="search-btn" id="search-btn" title="Analizar">→</button>
+        <div class="autocomplete-list" id="autocomplete-list"></div>
+      </div>
+      <div class="popular-tickers">
+        <span class="pill" data-ticker="NVDA">NVDA</span>
+        <span class="pill" data-ticker="MSFT">MSFT</span>
+        <span class="pill" data-ticker="V">V</span>
+        <span class="pill" data-ticker="COST">COST</span>
+        <span class="pill" data-ticker="LLY">LLY</span>
+        <span class="pill" data-ticker="JPM">JPM</span>
+        <span class="pill" data-ticker="GOOGL">GOOGL</span>
+        <span class="pill" data-ticker="CAT">CAT</span>
+      </div>
+    </section>
+
+    <div class="error-msg" id="error-msg"></div>
+    <div class="loading-container" id="loading">
+      <div class="spinner"></div>
+      <div class="loading-text" id="loading-text">Inicializando análisis...</div>
+      <div class="loading-bar-wrap"><div class="loading-bar" id="loading-bar"></div></div>
+    </div>
+
+    <div class="report" id="report">
+      <!-- Header -->
+      <div class="report-header fade-in">
+        <div class="report-company" id="r-company"></div>
+        <div class="report-meta">
+          <div class="report-meta-item">📁 <strong>Sector:</strong>&nbsp;<span id="r-sector"></span></div>
+          <div class="report-meta-item">🏭 <strong>Industria:</strong>&nbsp;<span id="r-industry"></span></div>
+          <div class="report-meta-item">💰 <strong>Precio:</strong>&nbsp;<span id="r-price"></span></div>
+          <div class="report-meta-item">📊 <strong>Cap. Mercado:</strong>&nbsp;<span id="r-mktcap"></span></div>
+        </div>
+      </div>
+
+      <!-- S1: Contexto -->
+      <div class="section-card" id="sec-1">
+        <div class="section-title"><span class="section-num">1</span> Contexto del Negocio</div>
+        <div id="r-context" class="narrative-text"></div>
+      </div>
+
+      <!-- S2: Valoración -->
+      <div class="section-card" id="sec-2">
+        <div class="section-title"><span class="section-num">2</span> Valoración Histórica & Sectorial</div>
+        <div style="overflow-x:auto;">
+          <table class="data-table">
+            <thead><tr><th>Métrica</th><th>Actual</th><th>Media 5A</th><th>Media Sector</th><th>vs. Histórico</th><th>vs. Sector</th></tr></thead>
+            <tbody id="r-val-table"></tbody>
+          </table>
+        </div>
+        <div class="synthesis" id="r-synthesis"></div>
+      </div>
+
+      <!-- S3: Consenso Analistas -->
+      <div class="section-card" id="sec-3">
+        <div class="section-title"><span class="section-num">3</span> Consenso de Analistas & Precio Objetivo</div>
+        <div id="r-analyst-content"></div>
+      </div>
+
+      <!-- S4: Insider & Institucional -->
+      <div class="section-card" id="sec-4">
+        <div class="section-title"><span class="section-num">4</span> Actividad Insider & Propiedad Institucional</div>
+        <div id="r-insider-content"></div>
+      </div>
+
+      <!-- S5: Moat -->
+      <div class="section-card" id="sec-5">
+        <div class="section-title"><span class="section-num">5</span> Ventaja Competitiva (MOAT) & Riesgos</div>
+        <div id="r-moat-content"></div>
+      </div>
+
+      <!-- S6: Technical Levels -->
+      <div class="section-card" id="sec-6">
+        <div class="section-title"><span class="section-num">6</span> Technical Levels & Momentum</div>
+        <div id="r-tech-content"></div>
+      </div>
+
+      <!-- S7: News & Sentiment -->
+      <div class="section-card" id="sec-7">
+        <div class="section-title"><span class="section-num">7</span> Últimas Noticias & Sentimiento</div>
+        <div id="r-news-content"><p style="color:var(--text-muted)">Cargando noticias...</p></div>
+      </div>
+
+      <!-- S8: Alpha Score -->
+      <div class="section-card" id="sec-8">
+        <div class="section-title"><span class="section-num">8</span> Veredicto & Alpha Score</div>
+        <div class="score-section">
+          <div class="score-circle-wrap">
+            <svg viewBox="0 0 120 120" width="120" height="120">
+              <circle class="score-circle-bg" cx="60" cy="60" r="48"></circle>
+              <circle class="score-circle-fg" id="score-fg" cx="60" cy="60" r="48" transform="rotate(-90 60 60)"></circle>
+            </svg>
+            <div class="score-number">
+              <div class="score-value" id="score-value">-</div>
+              <div class="score-label">Alpha Score</div>
+            </div>
+          </div>
+          <div>
+            <div class="verdict-badge" id="r-verdict"></div>
+            <div class="score-breakdown" style="margin-top:20px;">
+              <div class="score-bar-row"><span class="score-bar-label">Val. Histórica</span><div class="score-bar-track"><div class="score-bar-fill" id="bar-hist"></div></div><span class="score-bar-val">-</span></div>
+              <div class="score-bar-row"><span class="score-bar-label">Val. Sectorial</span><div class="score-bar-track"><div class="score-bar-fill" id="bar-sector"></div></div><span class="score-bar-val">-</span></div>
+              <div class="score-bar-row"><span class="score-bar-label">Fortaleza MOAT</span><div class="score-bar-track"><div class="score-bar-fill" id="bar-moat"></div></div><span class="score-bar-val">-</span></div>
+              <div class="score-bar-row"><span class="score-bar-label">Calidad Tendencia</span><div class="score-bar-track"><div class="score-bar-fill" id="bar-trend"></div></div><span class="score-bar-val">-</span></div>
+              <div class="score-bar-row"><span class="score-bar-label">Salud Financiera</span><div class="score-bar-track"><div class="score-bar-fill" id="bar-health"></div></div><span class="score-bar-val">-</span></div>
+              <div class="score-bar-row"><span class="score-bar-label">Sentimiento Analistas</span><div class="score-bar-track"><div class="score-bar-fill" id="bar-analyst"></div></div><span class="score-bar-val">-</span></div>
+              <div class="score-bar-row" id="score-weights-row" style="margin-top:8px;font-size:11px;color:var(--text-muted)"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- S9: Tesis -->
+      <div class="section-card" id="sec-9">
+        <div class="section-title"><span class="section-num">9</span> Tesis de Inversión & Estrategia de Entrada</div>
+        <div class="thesis-text" id="r-thesis"></div>
+        <div class="entry-price-card">
+          <div>
+            <div class="entry-price-label">Precio de Entrada Sugerido</div>
+            <div class="entry-price-value" id="r-entry-price">-</div>
+          </div>
+          <div class="entry-price-detail" id="r-price-just"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="js/app.js?v=4"></script>
+</body>
+</html>

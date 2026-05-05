@@ -1,0 +1,15 @@
+{
+  "name": "alphafundamental",
+  "version": "1.0.0",
+  "description": "AlphaFundamental — Value Investing Analysis Engine",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "install": "npm install"
+  },
+  "dependencies": {
+    "express": "^4.21.0"
+  }
+}
