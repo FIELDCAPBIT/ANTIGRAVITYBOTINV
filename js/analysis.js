@@ -4,14 +4,13 @@ import { TICKERS_DATA, SECTOR_AVERAGES } from './tickers.js';
 
 function safe(v) { return (v != null && isFinite(v) && !isNaN(v)) ? v : null; }
 
-// Scoring weight constants — exposed for UI tooltip
+// v3.0 Scoring weights — 1.1 Dynamic Weight System
 export const SCORE_WEIGHTS = {
-  histScore: { weight: 0.20, label: 'Val. Histórica' },
-  secScore:  { weight: 0.15, label: 'Val. Sectorial' },
-  moatScore: { weight: 0.20, label: 'Fortaleza MOAT' },
-  trendScore:{ weight: 0.15, label: 'Calidad Tendencia' },
+  bizQuality: { weight: 0.30, label: 'Calidad Negocio' },
+  moatScore:  { weight: 0.25, label: 'Fortaleza MOAT' },
+  valuation:  { weight: 0.20, label: 'Valoración' },
   healthScore:{ weight: 0.15, label: 'Salud Financiera' },
-  analystScore:{ weight: 0.15, label: 'Sentimiento Analistas' }
+  momentum:   { weight: 0.10, label: 'Momentum Fundamental' }
 };
 
 export function runAnalysis(ticker, apiData) {
@@ -20,7 +19,8 @@ export function runAnalysis(ticker, apiData) {
 
   const { profile, quote, ratiosTTM, ratiosHist, metricsTTM, metricsHist,
     analystTargets, recTrend, earningsDate, dividendDate, exDividendDate,
-    institutions, insiders, insiderActivity, technicals, spyReturn1y } = apiData;
+    institutions, insiders, insiderActivity, technicals, spyReturn1y,
+    earningsQuality: eqRaw, earningsRevisions: erRaw } = apiData;
   const sharesOutstanding = profile?.sharesOutstanding || null;
 
   const context = buildContext(meta, profile, quote);
@@ -30,10 +30,20 @@ export function runAnalysis(ticker, apiData) {
   const analyst = buildAnalyst(analystTargets, recTrend, earningsDate, dividendDate, exDividendDate, context.price);
   const insiderData = buildInsiderData(institutions, insiders, insiderActivity, sharesOutstanding);
   const techData = buildTechnicals(technicals, spyReturn1y, context.price);
-  const scoring = buildScoring(historical, sector, moat, analyst, context.price, ratiosTTM);
-  const thesis = buildThesis(meta, context, historical, sector, moat, scoring, analyst, ratiosTTM, metricsTTM);
 
-  return { context, historical, sector, moat, analyst, insiderData, techData, scoring, thesis, meta };
+  // v3.0 new modules
+  const earningsQual = buildEarningsQuality(eqRaw, metricsTTM);
+  const lifecycle = buildBusinessLifecycle(historical, ratiosTTM);
+  const meanReversion = buildMeanReversion(historical, sector);
+  const earningsRevisions = buildEarningsRevisions(erRaw);
+  const dcf = buildDCF(ratiosTTM, metricsTTM, historical, analyst, context.price, sharesOutstanding, moat, profile);
+
+  const scoring = buildScoring(historical, sector, moat, analyst, context.price, ratiosTTM, earningsQual, earningsRevisions, dcf);
+  const positionSizing = buildPositionSizing(scoring, analyst, moat, context.price, dcf);
+  const thesis = buildThesis(meta, context, historical, sector, moat, scoring, analyst, ratiosTTM, metricsTTM, dcf, techData, positionSizing);
+
+  return { context, historical, sector, moat, analyst, insiderData, techData, scoring, thesis, meta,
+    earningsQual, lifecycle, meanReversion, earningsRevisions, dcf, positionSizing };
 }
 
 // --- Section 1: Business Context (Spanish) ---
@@ -186,6 +196,145 @@ function buildTechnicals(tech, spyReturn1y, price) {
   return { ...tech, trend, rsiBand, spyReturn1y };
 }
 
+// --- 1.3: Earnings Quality Score ---
+function buildEarningsQuality(eqRaw, metricsTTM) {
+  const ccr = eqRaw?.cashConversion ?? null;
+  const accruals = eqRaw?.accrualsRatio ?? null;
+  let grade = 'media', emoji = '🟡', score = 5;
+  if (ccr != null) {
+    if (ccr > 0.85 && (accruals == null || accruals < 0.05)) { grade = 'alta'; emoji = '🟢'; score = 9; }
+    else if (ccr >= 0.60) { grade = 'media'; emoji = '🟡'; score = 6; }
+    else { grade = 'baja'; emoji = '🔴'; score = 3; }
+  }
+  return { cashConversion: ccr, accrualsRatio: accruals, grade, emoji, score,
+    netIncome: eqRaw?.netIncome, operatingCF: eqRaw?.operatingCashFlow, fcf: eqRaw?.freeCashFlow, totalAssets: eqRaw?.totalAssets };
+}
+
+// --- 2.3: Business Lifecycle ---
+function buildBusinessLifecycle(hist, ratiosTTM) {
+  const rg = hist.current.revGrowth;
+  const roic = hist.current.roic;
+  const om = hist.current.opMargin;
+  let phase = 3, label = 'Madurez', emoji = '📊', desc = '';
+  if (rg != null && roic != null) {
+    if (roic < 0.08 && (rg == null || rg > 0.15)) { phase = 1; label = 'Emergente'; emoji = '🌱'; desc = 'Empresa en fase de inversión agresiva. ROIC aún bajo, prioridad en capturar mercado. No aplicar ratios de empresa madura.'; }
+    else if (rg > 0.15) { phase = 2; label = 'Crecimiento'; emoji = '🚀'; desc = 'Crecimiento acelerado con márgenes en expansión. Un P/E elevado puede estar justificado por la trayectoria de crecimiento.'; }
+    else if (rg > 0 && roic > 0.10) { phase = 3; label = 'Madurez'; emoji = '📊'; desc = 'Negocio maduro con retornos estables. Buscar buybacks, dividendos y eficiencia operativa como señales de disciplina de capital.'; }
+    else { phase = 4; label = 'Declive'; emoji = '📉'; desc = 'Crecimiento estancado o negativo con márgenes bajo presión. Alta cautela: verificar si es cíclico o estructural.'; }
+  } else if (rg != null && rg > 0.20) { phase = 2; label = 'Crecimiento'; emoji = '🚀'; desc = 'Alto crecimiento de ingresos. Evaluar sostenibilidad.'; }
+  else { desc = 'Negocio con métricas estables típicas de fase madura.'; }
+  return { phase, label, emoji, desc };
+}
+
+// --- 2.4: Mean Reversion Score ---
+function buildMeanReversion(hist, sec) {
+  const devs = [hist.deviation.pe, hist.deviation.pfcf, hist.deviation.evEbitda].filter(d => d != null);
+  if (!devs.length) return { score: null, label: 'Sin datos', desc: 'Datos insuficientes para calcular reversión a la media.' };
+  const avgDev = devs.reduce((a, b) => a + b, 0) / devs.length;
+  // High positive deviation = high reversion probability (overvalued tends to revert down)
+  // High negative deviation = low reversion probability short term (undervalued)
+  let score, label;
+  if (avgDev > 0.20) { score = 9; label = 'Muy alta'; }
+  else if (avgDev > 0.10) { score = 7; label = 'Alta'; }
+  else if (avgDev > -0.05) { score = 5; label = 'Moderada'; }
+  else if (avgDev > -0.15) { score = 3; label = 'Baja'; }
+  else { score = 1; label = 'Muy baja'; }
+  const dir = avgDev > 0.05 ? 'a la baja (sobrevaluado)' : avgDev < -0.05 ? 'al alza (infravaluado)' : 'neutral';
+  return { score, label, avgDev,
+    desc: `Probabilidad de reversión ${label.toLowerCase()} ${dir}. Los múltiplos actuales se desvían un ${Math.abs(avgDev * 100).toFixed(0)}% de la media histórica. Históricamente, desviaciones >15% tienden a revertir en 12-24 meses.` };
+}
+
+// --- 3.4: Earnings Revision Momentum ---
+function buildEarningsRevisions(erRaw) {
+  if (!erRaw) return { available: false, score: 5, signal: 'Sin datos' };
+  const cy = erRaw.currentYear || {};
+  const ny = erRaw.nextYear || {};
+  // Calculate revision % changes
+  const epsRev30d = (cy.epsEst && cy.epsPrior30d && cy.epsPrior30d !== 0) ? (cy.epsEst - cy.epsPrior30d) / Math.abs(cy.epsPrior30d) : null;
+  const epsRev90d = (cy.epsEst && cy.epsPrior90d && cy.epsPrior90d !== 0) ? (cy.epsEst - cy.epsPrior90d) / Math.abs(cy.epsPrior90d) : null;
+  const revRev30d = (cy.revEst && cy.revPrior30d && cy.revPrior30d !== 0) ? (cy.revEst - cy.revPrior30d) / Math.abs(cy.revPrior30d) : null;
+  const ratio = (cy.numUp + cy.numDown > 0) ? cy.numUp / (cy.numUp + cy.numDown) : null;
+  // Score
+  let score = 5;
+  const factors = [];
+  if (epsRev30d != null) { if (epsRev30d > 0.02) { score += 1.5; factors.push('EPS ↑'); } else if (epsRev30d < -0.02) { score -= 1.5; factors.push('EPS ↓'); } }
+  if (epsRev90d != null) { if (epsRev90d > 0.05) { score += 1; factors.push('EPS 90d ↑'); } else if (epsRev90d < -0.05) { score -= 1; factors.push('EPS 90d ↓'); } }
+  if (ratio != null) { if (ratio > 0.7) { score += 1.5; factors.push('Ratio ↑'); } else if (ratio < 0.3) { score -= 1.5; factors.push('Ratio ↓'); } }
+  score = Math.min(10, Math.max(0, score));
+  const signal = score >= 7 ? 'Positivo' : score <= 3 ? 'Negativo' : 'Neutral';
+  return { available: true, score: parseFloat(score.toFixed(1)), signal, epsRev30d, epsRev90d, revRev30d, ratio,
+    currentYear: cy, nextYear: ny, factors };
+}
+
+// --- 1.2: DCF with Scenarios ---
+function buildDCF(ratiosTTM, metricsTTM, hist, analyst, price, shares, moat, profile) {
+  const fcf = metricsTTM?.freeCashFlowPerShareTTM ? metricsTTM.freeCashFlowPerShareTTM * shares : null;
+  if (!fcf || fcf <= 0 || !shares || !price) return { available: false };
+  const fcfPS = fcf / shares;
+  const beta = profile?.beta || 1.0;
+  const wacc = 0.045 + beta * 0.055; // risk-free 4.5% + beta * equity premium 5.5%
+  const termGrowth = 0.025;
+  const rg = hist.current.revGrowth ?? 0.08;
+
+  const scenario = (growthRate, marginAdj, label) => {
+    let cumFCF = 0;
+    let projFCF = fcfPS;
+    for (let y = 1; y <= 5; y++) {
+      projFCF *= (1 + growthRate) * (1 + marginAdj / 5);
+      cumFCF += projFCF / Math.pow(1 + wacc, y);
+    }
+    const termValue = projFCF * (1 + termGrowth) / (wacc - termGrowth);
+    const pvTerm = termValue / Math.pow(1 + wacc, 5);
+    return { label, value: parseFloat((cumFCF + pvTerm).toFixed(2)), growthRate, marginAdj };
+  };
+
+  const bear = scenario(Math.max(0, rg * 0.5), -0.03, 'Bajista');
+  const base = scenario(rg, 0, 'Base');
+  const bull = scenario(rg * 1.3, 0.02, 'Alcista');
+
+  let probBase = 0.50, probBear = 0.25, probBull = 0.25;
+  if (moat.rating === 'Wide') { probBase += 0.05; probBear -= 0.05; }
+  else if (moat.rating === 'None') { probBear += 0.10; probBase -= 0.05; probBull -= 0.05; }
+  
+  const revGrowthDiff = (hist.current.revGrowth ?? 0) - (hist.avg5y.revGrowth ?? 0);
+  if (revGrowthDiff > 0.05) { probBull += 0.05; probBear -= 0.05; }
+  else if (revGrowthDiff < -0.05) { probBear += 0.05; probBull -= 0.05; }
+
+  const opMarginDiff = (hist.current.opMargin ?? 0) - (hist.avg5y.opMargin ?? 0);
+  if (opMarginDiff > 0.02) { probBull += 0.05; probBear -= 0.05; }
+  else if (opMarginDiff < -0.02) { probBear += 0.05; probBull -= 0.05; }
+
+  const totalProb = probBase + probBear + probBull;
+  probBase /= totalProb; probBear /= totalProb; probBull /= totalProb;
+
+  bear.prob = probBear; base.prob = probBase; bull.prob = probBull;
+  const weighted = parseFloat((bear.value * probBear + base.value * probBase + bull.value * probBull).toFixed(2));
+  const upside = (weighted - price) / price;
+
+  return { available: true, bear, base, bull, weighted, upside, wacc, termGrowth, fcfPS: parseFloat(fcfPS.toFixed(2)), shares };
+}
+
+// --- 4.2: Position Sizing (Modified Kelly) ---
+function buildPositionSizing(scoring, analyst, moat, price, dcf) {
+  const sc = scoring.alphaScore;
+  let category, emoji, range;
+  if (sc >= 8.5) { category = 'Alta Convicción'; emoji = '🏆'; range = '5-8%'; }
+  else if (sc >= 7.0) { category = 'Media Convicción'; emoji = '📊'; range = '2-4%'; }
+  else if (sc >= 5.5) { category = 'Seguimiento'; emoji = '🔍'; range = '0%'; }
+  else { category = 'No Invertir'; emoji = '❌'; range = '0%'; }
+
+  // Half-Kelly calculation
+  let kellyPct = 0;
+  if (dcf?.available && dcf.upside != null) {
+    const probSuccess = Math.min(0.85, Math.max(0.15, 0.5 + (sc - 5) * 0.07));
+    const upside = Math.max(0.01, dcf.upside);
+    const downside = Math.max(0.05, moat.rating === 'Wide' ? 0.15 : moat.rating === 'Narrow' ? 0.25 : 0.35);
+    const kelly = (probSuccess * upside - (1 - probSuccess) * downside) / upside;
+    kellyPct = Math.max(0, Math.min(10, kelly * 50)); // Half-Kelly, max 10%
+  }
+  return { category, emoji, range, kellyPct: parseFloat(kellyPct.toFixed(1)), alphaScore: sc };
+}
+
 // Moat source explanations map
 const MOAT_SOURCE_DESC = {
   'Network Effects': 'efectos de red que hacen que el producto sea más valioso a medida que más usuarios lo adoptan, creando un ciclo virtuoso difícil de romper',
@@ -224,59 +373,35 @@ function buildMoat(meta, cur) {
   return { rating: meta.moatRating, sources: meta.moatSources, risks: meta.risks, strength: s, expanding, durability, moatExplanation };
 }
 
-// --- Section 7: Enhanced Decimal Scoring Engine ---
-// Continuous interpolation for maximum granularity (0.0–10.0)
-function buildScoring(hist, sec, moat, analyst, price, ratiosTTM) {
-
-  // Linear interpolation: maps a value in [inLow,inHigh] → [outLow,outHigh], clamped
+// --- v3.0 Scoring Engine: 5-Pillar Dynamic Weights ---
+function buildScoring(hist, sec, moat, analyst, price, ratiosTTM, earningsQual, earningsRevisions, dcf) {
   const lerp = (val, inLow, inHigh, outLow, outHigh) => {
-    if (val <= inLow) return outLow;
-    if (val >= inHigh) return outHigh;
+    if (val <= inLow) return outLow; if (val >= inHigh) return outHigh;
     return outLow + (val - inLow) / (inHigh - inLow) * (outHigh - outLow);
   };
-
-  // Score a valuation deviation (lower = better for PE/PFcf/EvEbitda)
   const scoreValDev = (dev) => {
     if (dev == null) return null;
-    if (dev <= -0.30) return 10.0;
-    if (dev <= -0.10) return lerp(dev, -0.30, -0.10, 10.0, 7.5);
-    if (dev <= 0)     return lerp(dev, -0.10, 0, 7.5, 5.0);
-    if (dev <= 0.10)  return lerp(dev, 0, 0.10, 5.0, 3.5);
-    if (dev <= 0.25)  return lerp(dev, 0.10, 0.25, 3.5, 1.5);
-    if (dev <= 0.40)  return lerp(dev, 0.25, 0.40, 1.5, 0.0);
+    if (dev <= -0.30) return 10.0; if (dev <= -0.10) return lerp(dev, -0.30, -0.10, 10.0, 7.5);
+    if (dev <= 0) return lerp(dev, -0.10, 0, 7.5, 5.0); if (dev <= 0.10) return lerp(dev, 0, 0.10, 5.0, 3.5);
+    if (dev <= 0.25) return lerp(dev, 0.10, 0.25, 3.5, 1.5); if (dev <= 0.40) return lerp(dev, 0.25, 0.40, 1.5, 0.0);
     return 0.0;
   };
-
-  // Score a quality deviation (higher = better for ROIC/margin)
   const scoreQualDev = (dev) => {
     if (dev == null) return null;
-    if (dev >= 0.30)  return 10.0;
-    if (dev >= 0.10)  return lerp(dev, 0.10, 0.30, 7.5, 10.0);
-    if (dev >= 0)     return lerp(dev, 0, 0.10, 5.0, 7.5);
-    if (dev >= -0.10) return lerp(dev, -0.10, 0, 3.0, 5.0);
-    if (dev >= -0.25) return lerp(dev, -0.25, -0.10, 1.0, 3.0);
-    return 0.5;
+    if (dev >= 0.30) return 10.0; if (dev >= 0.10) return lerp(dev, 0.10, 0.30, 7.5, 10.0);
+    if (dev >= 0) return lerp(dev, 0, 0.10, 5.0, 7.5); if (dev >= -0.10) return lerp(dev, -0.10, 0, 3.0, 5.0);
+    if (dev >= -0.25) return lerp(dev, -0.25, -0.10, 1.0, 3.0); return 0.5;
   };
+  const avgValid = (arr) => { const v = arr.filter(s => s != null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : 5.0; };
 
-  const avgValid = (arr) => {
-    const v = arr.filter(s => s != null);
-    return v.length ? v.reduce((a, b) => a + b, 0) / v.length : 5.0;
-  };
+  // PILLAR 1: Business Quality (30%) — ROIC, margins, growth, earnings quality
+  const roicScore = scoreQualDev(hist.deviation.roic);
+  const marginScore = scoreQualDev(hist.deviation.opMargin);
+  const growthScore = scoreQualDev(hist.deviation.revGrowth);
+  const eqScore = earningsQual ? earningsQual.score : 5;
+  const bizQuality = avgValid([roicScore, marginScore, growthScore, eqScore]);
 
-  // --- Sub-score 1: Historical Valuation (5 metrics) ---
-  const histScore = avgValid([
-    scoreValDev(hist.deviation.pe), scoreValDev(hist.deviation.pfcf),
-    scoreValDev(hist.deviation.evEbitda), scoreValDev(hist.deviation.forwardPE),
-    scoreValDev(hist.deviation.peg)
-  ]);
-
-  // --- Sub-score 2: Sector Comparison (3 metrics) ---
-  const secScore = avgValid([
-    scoreValDev(sec.deviation.pe), scoreValDev(sec.deviation.pfcf),
-    scoreValDev(sec.deviation.evEbitda)
-  ]);
-
-  // --- Sub-score 3: Moat (continuous based on rating + ROIC + margin) ---
+  // PILLAR 2: Moat Strength (25%)
   let moatBase = moat.rating === 'Wide' ? 8.0 : moat.rating === 'Narrow' ? 5.0 : 2.0;
   if (hist.current.roic != null) {
     if (hist.current.roic > 0.30) moatBase += 1.5;
@@ -287,13 +412,24 @@ function buildScoring(hist, sec, moat, analyst, price, ratiosTTM) {
   if (hist.current.opMargin != null && hist.current.opMargin > 0.25) moatBase += 0.5;
   const moatScore = Math.min(10.0, Math.max(0.0, moatBase));
 
-  // --- Sub-score 4: Quality Trend (ROIC + opMargin + revGrowth vs history) ---
-  const trendScore = avgValid([
-    scoreQualDev(hist.deviation.roic), scoreQualDev(hist.deviation.opMargin),
-    scoreQualDev(hist.deviation.revGrowth)
-  ]);
+  // PILLAR 3: Valuation (20%) — historical + sector + DCF + analyst consensus
+  const histValScore = avgValid([scoreValDev(hist.deviation.pe), scoreValDev(hist.deviation.pfcf), scoreValDev(hist.deviation.evEbitda), scoreValDev(hist.deviation.forwardPE)]);
+  const secValScore = avgValid([scoreValDev(sec.deviation.pe), scoreValDev(sec.deviation.pfcf), scoreValDev(sec.deviation.evEbitda)]);
+  let dcfScore = 5;
+  if (dcf?.available && dcf.upside != null) {
+    if (dcf.upside >= 0.30) dcfScore = 9; else if (dcf.upside >= 0.15) dcfScore = lerp(dcf.upside, 0.15, 0.30, 7, 9);
+    else if (dcf.upside >= 0) dcfScore = lerp(dcf.upside, 0, 0.15, 5, 7);
+    else if (dcf.upside >= -0.15) dcfScore = lerp(dcf.upside, -0.15, 0, 2.5, 5); else dcfScore = 1.5;
+  }
+  let analystUpScore = 5;
+  if (analyst.upside != null) {
+    if (analyst.upside >= 0.30) analystUpScore = 9; else if (analyst.upside >= 0.15) analystUpScore = lerp(analyst.upside, 0.15, 0.30, 7, 9);
+    else if (analyst.upside >= 0) analystUpScore = lerp(analyst.upside, 0, 0.15, 5, 7);
+    else if (analyst.upside >= -0.15) analystUpScore = lerp(analyst.upside, -0.15, 0, 2.5, 5); else analystUpScore = 1.5;
+  }
+  const valuation = avgValid([histValScore, secValScore, dcfScore, analystUpScore]);
 
-  // --- Sub-score 5: Financial Health (Net Debt/EBITDA continuous) ---
+  // PILLAR 4: Financial Health (15%)
   let healthScore = 5.0;
   const nde = hist.current.netDebtEbitda;
   if (nde != null) {
@@ -305,45 +441,30 @@ function buildScoring(hist, sec, moat, analyst, price, ratiosTTM) {
     else healthScore = Math.max(0.5, lerp(nde, 5.0, 8.0, 2.0, 0.5));
   }
 
-  // --- Sub-score 6: Analyst Consensus (recommendation + upside blend) ---
-  let analystScore = 5.0;
-  if (analyst.available) {
-    let recScore = 5.0;
+  // PILLAR 5: Fundamental Momentum (10%) — estimate revisions + analyst consensus
+  const revScore = earningsRevisions?.available ? earningsRevisions.score : 5;
+  let recScore = 5;
+  if (analyst.recommendationMean != null) {
     const rm = analyst.recommendationMean;
-    if (rm != null) {
-      if (rm <= 1.0) recScore = 10.0;
-      else if (rm <= 2.0) recScore = lerp(rm, 1.0, 2.0, 10.0, 7.5);
-      else if (rm <= 2.5) recScore = lerp(rm, 2.0, 2.5, 7.5, 5.5);
-      else if (rm <= 3.0) recScore = lerp(rm, 2.5, 3.0, 5.5, 4.0);
-      else if (rm <= 4.0) recScore = lerp(rm, 3.0, 4.0, 4.0, 2.0);
-      else recScore = Math.max(0.5, lerp(rm, 4.0, 5.0, 2.0, 0.5));
-    }
-    let upsideScore = 5.0;
-    if (analyst.upside != null) {
-      if (analyst.upside >= 0.30) upsideScore = 9.0;
-      else if (analyst.upside >= 0.15) upsideScore = lerp(analyst.upside, 0.15, 0.30, 7.0, 9.0);
-      else if (analyst.upside >= 0) upsideScore = lerp(analyst.upside, 0, 0.15, 5.0, 7.0);
-      else if (analyst.upside >= -0.15) upsideScore = lerp(analyst.upside, -0.15, 0, 2.5, 5.0);
-      else upsideScore = 1.5;
-    }
-    analystScore = recScore * 0.65 + upsideScore * 0.35;
+    if (rm <= 1.0) recScore = 10; else if (rm <= 2.0) recScore = lerp(rm, 1, 2, 10, 7.5);
+    else if (rm <= 2.5) recScore = lerp(rm, 2, 2.5, 7.5, 5.5); else if (rm <= 3.0) recScore = lerp(rm, 2.5, 3, 5.5, 4);
+    else if (rm <= 4.0) recScore = lerp(rm, 3, 4, 4, 2); else recScore = 1;
   }
+  const momentum = avgValid([revScore, recScore]);
 
-  // --- Weighted Final Score (weights documented in SCORE_WEIGHTS) ---
-  // 20% Historical Valuation + 15% Sector + 20% MOAT + 15% Trend + 15% Health + 15% Analyst = 100%
+  // Weighted Final
   const W = SCORE_WEIGHTS;
-  const rawScore = W.histScore.weight * histScore + W.secScore.weight * secScore + W.moatScore.weight * moatScore
-                 + W.trendScore.weight * trendScore + W.healthScore.weight * healthScore + W.analystScore.weight * analystScore;
+  const rawScore = W.bizQuality.weight * bizQuality + W.moatScore.weight * moatScore
+    + W.valuation.weight * valuation + W.healthScore.weight * healthScore + W.momentum.weight * momentum;
   let alphaScore = parseFloat(Math.min(10.0, Math.max(0.1, rawScore)).toFixed(1));
 
-  // --- Overvalued Cap ---
+  // Overvalued Cap
   let isOvervalued = false;
   if (analyst.upside != null && analyst.upside < -0.05) isOvervalued = true;
   const avgMD = calcAverageDev([hist.deviation.pe, hist.deviation.pfcf, hist.deviation.evEbitda]);
   if (avgMD != null && avgMD > 0.15) isOvervalued = true;
   if (isOvervalued && alphaScore > 5.0) alphaScore = 5.0;
 
-  // --- Verdict (decimal thresholds) ---
   let verdict;
   if (isOvervalued) verdict = alphaScore <= 2.5 ? 'STRONG SELL' : alphaScore <= 3.5 ? 'SELL' : 'HOLD';
   else if (alphaScore >= 7.5) verdict = 'STRONG BUY';
@@ -352,15 +473,10 @@ function buildScoring(hist, sec, moat, analyst, price, ratiosTTM) {
   else if (alphaScore >= 2.5) verdict = 'SELL';
   else verdict = 'STRONG SELL';
 
-  return {
-    alphaScore, verdict, isOvervalued,
-    histScore: parseFloat(histScore.toFixed(1)),
-    secScore: parseFloat(secScore.toFixed(1)),
-    moatScore: parseFloat(moatScore.toFixed(1)),
-    trendScore: parseFloat(trendScore.toFixed(1)),
-    healthScore: parseFloat(healthScore.toFixed(1)),
-    analystScore: parseFloat(analystScore.toFixed(1))
-  };
+  return { alphaScore, verdict, isOvervalued,
+    bizQuality: parseFloat(bizQuality.toFixed(1)), moatScore: parseFloat(moatScore.toFixed(1)),
+    valuation: parseFloat(valuation.toFixed(1)), healthScore: parseFloat(healthScore.toFixed(1)),
+    momentum: parseFloat(momentum.toFixed(1)) };
 }
 
 function calcAverageDev(devs) {
@@ -369,89 +485,101 @@ function calcAverageDev(devs) {
   return valid.reduce((a, b) => a + b, 0) / valid.length;
 }
 
-// --- Section 8: Thesis & Entry Price (Spanish) ---
-// ERROR 1 FIX: Intrinsic value = simple arithmetic mean of available methods (P/E, P/FCF, Consensus)
-// ERROR 2 FIX: Entry price = intrinsic_value × (1 - margin_of_safety), clearly documented
-function buildThesis(meta, ctx, hist, sec, moat, scoring, analyst, ratiosTTM, metricsTTM) {
+// --- v3.0 Thesis: Compact + Structured Decision (4.1) ---
+function buildThesis(meta, ctx, hist, sec, moat, scoring, analyst, ratiosTTM, metricsTTM, dcf, techData, positionSizing) {
   const price = ctx.price;
-  let ivPE = null, ivPFCF = null, ivConsensus = null;
-  const pe = safe(ratiosTTM?.priceToEarningsRatioTTM);
-  const eps = pe && price ? price / pe : null;
-  if (eps && eps > 0 && hist.avg5y.pe && hist.avg5y.pe > 0) ivPE = hist.avg5y.pe * eps;
-  const fcfPS = safe(ratiosTTM?.freeCashFlowPerShareTTM);
-  if (fcfPS && fcfPS > 0 && hist.avg5y.pfcf && hist.avg5y.pfcf > 0) ivPFCF = hist.avg5y.pfcf * fcfPS;
-  if (analyst.targetMean && analyst.targetMean > 0) ivConsensus = analyst.targetMean;
-
-  // Simple arithmetic mean of all available methods
-  const ivMethods = [ivPE, ivPFCF, ivConsensus].filter(v => v != null && v > 0);
-  let iv = ivMethods.length > 0 ? ivMethods.reduce((a, b) => a + b, 0) / ivMethods.length : null;
-  const ivMethodCount = ivMethods.length;
-
-  // Margin of safety based on moat strength
-  const mos = moat.rating === 'Wide' ? 0.15 : moat.rating === 'Narrow' ? 0.20 : 0.25;
-
-  // Entry price: intrinsic_value × (1 - margin_of_safety)
-  // Rule: entry must ALWAYS be below current price
+  
+  // 1. DCF value
+  const valDCF = dcf?.available ? dcf.weighted : null;
+  
+  // 2. Valor por P/E forward
+  let valPE = null;
+  const fwdPE = safe(ratiosTTM?.forwardPE);
+  if (fwdPE && fwdPE > 0 && price && hist.avg5y.pe > 0) {
+    const fwdEps = price / fwdPE;
+    valPE = hist.avg5y.pe * fwdEps;
+  }
+  
+  // 3. Valor por P/FCF
+  let valPFCF = null;
+  const fcfPS = safe(metricsTTM?.freeCashFlowPerShareTTM) || safe(ratiosTTM?.freeCashFlowPerShareTTM);
+  if (fcfPS && fcfPS > 0 && hist.avg5y.pfcf > 0) valPFCF = hist.avg5y.pfcf * fcfPS;
+  
+  // 4. Blend ponderado
+  const methods = [];
+  if (valDCF) methods.push({v: valDCF, w: 0.4});
+  if (valPE) methods.push({v: valPE, w: 0.3});
+  if (valPFCF) methods.push({v: valPFCF, w: 0.3});
+  
+  let blend = null;
+  if (methods.length > 0) {
+    const totalW = methods.reduce((acc, m) => acc + m.w, 0);
+    blend = methods.reduce((acc, m) => acc + m.v * (m.w / totalW), 0);
+  } else if (analyst.targetMean) {
+    blend = analyst.targetMean;
+  }
+  
   let entry = null;
-  if (iv && price) {
-    entry = iv * (1 - mos);
-    // Ensure entry is always below current price
-    entry = Math.min(entry, price * 0.97);
-    if (scoring.isOvervalued || iv < price) {
-      const disc = moat.rating === 'Wide' ? 0.10 : moat.rating === 'Narrow' ? 0.12 : 0.15;
-      entry = Math.min(entry, price * (1 - disc));
+  if (blend && price) {
+    // 5. Ajustes al blend
+    let adjFactor = 1.0;
+    if (moat.rating === 'Wide') adjFactor += 0.10;
+    else if (moat.rating === 'None') adjFactor -= 0.10;
+    
+    const fundamentalsImproving = (hist.current.roic > hist.avg5y.roic) && (hist.current.opMargin > hist.avg5y.opMargin);
+    const fundamentalsDeteriorating = (hist.current.roic < hist.avg5y.roic) && (hist.current.opMargin < hist.avg5y.opMargin);
+    if (fundamentalsImproving) adjFactor += 0.05;
+    else if (fundamentalsDeteriorating) adjFactor -= 0.08;
+    
+    if (hist.current.netDebtEbitda != null && hist.current.netDebtEbitda > 3.0) adjFactor -= 0.15;
+    
+    const adjustedIntrinsic = blend * adjFactor;
+    
+    // 6. Margen de seguridad dinámico
+    let margin = moat.rating === 'Wide' ? 0.12 : moat.rating === 'Narrow' ? 0.18 : 0.25;
+    const estBeta = dcf?.available ? Math.max(0.5, (dcf.wacc - 0.045) / 0.055) : 1.0;
+    if (estBeta > 1.2) margin += 0.05;
+    if (techData?.rsi != null) {
+      if (techData.rsi < 30) margin -= 0.05;
+      else if (techData.rsi > 70) margin += 0.05;
     }
+    margin = Math.max(0.05, Math.min(0.50, margin)); // 5% to 50%
+    
+    // 7. Cálculo final
+    entry = adjustedIntrinsic * (1 - margin);
+    
+    // 8. Regla absoluta
+    if (entry > price) entry = price * (1 - margin);
   }
 
+  // Compact thesis (max ~10 lines)
   const v = scoring.verdict;
   const roicPct = hist.current.roic != null ? (hist.current.roic * 100).toFixed(1) : 'N/A';
   const opMPct = hist.current.opMargin != null ? (hist.current.opMargin * 100).toFixed(1) : 'N/A';
-  const moatSrc = moat.sources.length > 0 ? moat.sources.join(', ') : 'ventajas competitivas limitadas';
-  const pePct = hist.deviation.pe != null ? (hist.deviation.pe * 100).toFixed(0) : null;
-
-  let p1 = '';
+  let thesisText = '';
   if (v === 'STRONG BUY' || v === 'BUY') {
-    p1 = `${meta.name} presenta una oportunidad de valor convincente para inversores a largo plazo. Cotiza con descuento respecto a sus propios múltiplos históricos de 5 años, con un P/E trailing de ${hist.current.pe ? hist.current.pe.toFixed(1) + 'x' : 'N/A'} frente a una media de ${hist.avg5y.pe ? hist.avg5y.pe.toFixed(1) + 'x' : 'N/A'}. El ROIC de ${roicPct}% supera significativamente su coste de capital, indicando creación real de valor económico. Con márgenes operativos del ${opMPct}%, el negocio demuestra poder de fijación de precios y eficiencia operativa que el mercado puede estar infravalorando.`;
+    thesisText = `${meta.name} presenta una oportunidad de valor para inversores a largo plazo. Cotiza con descuento respecto a sus múltiplos históricos (P/E ${hist.current.pe ? hist.current.pe.toFixed(1) + 'x' : 'N/A'} vs media 5A ${hist.avg5y.pe ? hist.avg5y.pe.toFixed(1) + 'x' : 'N/A'}). ROIC del ${roicPct}% y márgenes del ${opMPct}% confirman creación de valor económico sostenible.`;
   } else if (v === 'HOLD') {
-    p1 = `${meta.name} cotiza a niveles ampliamente consistentes con su valor fundamental. La valoración actual refleja una visión equilibrada de las perspectivas de crecimiento y perfil de riesgo. Con un P/E trailing de ${hist.current.pe ? hist.current.pe.toFixed(1) + 'x' : 'N/A'}, la acción no está materialmente barata ni cara respecto a su propio histórico. El ROIC de ${roicPct}% y margen operativo de ${opMPct}% indican calidad sólida pero ya reflejada en precio.`;
+    thesisText = `${meta.name} cotiza a niveles consistentes con su valor fundamental. La valoración actual refleja equilibrio entre perspectivas y riesgo. ROIC del ${roicPct}% y margen operativo del ${opMPct}% indican calidad sólida pero ya reflejada en precio.`;
   } else {
-    p1 = `${meta.name} parece sobrevalorada a niveles actuales. Cotiza a múltiplos elevados respecto a su propio histórico y peers del sector, con un P/E trailing de ${hist.current.pe ? hist.current.pe.toFixed(1) + 'x' : 'N/A'} frente a una media 5Y de ${hist.avg5y.pe ? hist.avg5y.pe.toFixed(1) + 'x' : 'N/A'}. Aunque la calidad del negocio sigue siendo fuerte con ROIC al ${roicPct}% y márgenes del ${opMPct}%, la prima actual deja un margen de seguridad mínimo.`;
+    thesisText = `${meta.name} parece sobrevalorada a niveles actuales. Múltiplos elevados respecto a su histórico y peers. La calidad del negocio (ROIC ${roicPct}%, márgenes ${opMPct}%) sigue siendo fuerte pero la prima actual deja margen de seguridad mínimo.`;
+  }
+  if (analyst.available && analyst.upside != null) {
+    thesisText += ` Consenso de ${analyst.numberOfAnalysts} analistas: $${analyst.targetMean?.toFixed(2)} (${analyst.upside >= 0 ? '+' : ''}${(analyst.upside * 100).toFixed(0)}% upside).`;
   }
 
-  let p2 = `La posición competitiva se sustenta en su moat ${moat.rating === 'Wide' ? 'amplio' : moat.rating === 'Narrow' ? 'estrecho' : 'inexistente'}, impulsado por ${moatSrc}. `;
-  if (moat.rating === 'Wide') p2 += `Este moat está ${moat.expanding === 'En expansión' ? 'ampliándose activamente' : 'estable y duradero'}, proporcionando un runway de décadas para la capitalización compuesta. Las ventajas estructurales son difíciles de replicar y crean altas barreras de entrada.`;
-  else if (moat.rating === 'Narrow') p2 += `Este moat proporciona una ventaja competitiva pero podría erosionarse con el tiempo ante la disrupción tecnológica y competidores agresivos.`;
-  else p2 += `La ausencia de ventajas competitivas duraderas expone a la empresa a presiones competitivas intensas.`;
+  // 4.1: Structured Decision
+  let actionLabel, actionEmoji, strategy, horizon;
+  if (v === 'STRONG BUY') { actionLabel = 'ACUMULAR'; actionEmoji = '📈'; strategy = entry ? `DCA bajo $${entry.toFixed(0)}` : 'DCA en correcciones'; horizon = '3-5 años mínimo'; }
+  else if (v === 'BUY') { actionLabel = 'COMPRA SELECTIVA'; actionEmoji = '🟢'; strategy = entry ? `Entrada escalonada bajo $${entry.toFixed(0)}` : 'Esperar pullback'; horizon = '2-4 años'; }
+  else if (v === 'HOLD') { actionLabel = 'MANTENER / ESPERAR'; actionEmoji = '⏸️'; strategy = 'No abrir posición nueva'; horizon = 'Reevaluar en 3-6 meses'; }
+  else if (v === 'SELL') { actionLabel = 'REDUCIR'; actionEmoji = '🟡'; strategy = 'Reducir exposición gradualmente'; horizon = 'Salida en 1-3 meses'; }
+  else { actionLabel = 'VENDER'; actionEmoji = '🔴'; strategy = 'Liquidar posición'; horizon = 'Inmediato'; }
 
-  let p3 = '';
-  if (pePct !== null) p3 = `Desde la perspectiva de valoración, la acción cotiza con un ${Math.abs(parseInt(pePct))}% de ${parseInt(pePct) < 0 ? 'descuento' : 'prima'} respecto a su P/E medio de 5 años. `;
-  else p3 = 'Los datos de valoración sugieren que la acción está en línea con las normas históricas. ';
-  if (analyst.available && analyst.upside != null) p3 += `El consenso de analistas de $${analyst.targetMean?.toFixed(2)} implica un ${analyst.upside >= 0 ? '+' : ''}${(analyst.upside * 100).toFixed(0)}% desde niveles actuales (${analyst.numberOfAnalysts} analistas). `;
-  if (iv) p3 += `Nuestro valor intrínseco (media aritmética de ${ivMethodCount} método${ivMethodCount > 1 ? 's' : ''}) es $${iv.toFixed(2)}, lo que sugiere que la acción cotiza ${iv > price ? 'por debajo' : 'por encima'} de su valor justo.`;
-
-  let p4 = `Los riesgos clave incluyen ${moat.risks[0]?.toLowerCase() || 'presiones competitivas'} y ${moat.risks[1]?.toLowerCase() || 'ciclicidad del mercado'}. `;
-  if (entry && iv && price) {
-    const ds = ((entry - price) / price * 100).toFixed(0);
-    const us = iv > price ? ((iv - price) / price * 100).toFixed(0) : '0';
-    p4 += `En un escenario bajista, la acción podría retroceder hasta nuestro nivel de entrada de $${entry.toFixed(2)} (${ds}% desde actual). `;
-    if (parseFloat(us) > 0) p4 += `En el caso base, la convergencia al valor intrínseco de $${iv.toFixed(2)} ofrece un +${us}% de upside. `;
-    p4 += scoring.alphaScore >= 6
-      ? `Recomendamos acumular por debajo de $${entry.toFixed(2)} con un ${(mos * 100).toFixed(0)}% de margen de seguridad.`
-      : `Recomendamos esperar un punto de entrada más atractivo antes de comprometer nuevo capital.`;
-  }
-
-  const thesisText = [p1, p2, p3, p4].join('\n\n');
-  let just = '';
-  if (iv && entry && price) {
-    just = `Valor intrínseco: $${iv.toFixed(2)} (media aritmética: `;
-    const parts = [];
-    if (ivPE) parts.push(`P/E → $${ivPE.toFixed(2)}`);
-    if (ivPFCF) parts.push(`P/FCF → $${ivPFCF.toFixed(2)}`);
-    if (ivConsensus) parts.push(`Consenso → $${ivConsensus.toFixed(2)}`);
-    just += parts.join(', ');
-    just += `). ${(mos * 100).toFixed(0)}% margen de seguridad (${moat.rating} moat) → entrada $${entry.toFixed(2)}. `;
-    just += `Precio actual $${price.toFixed(2)} está ${price > iv ? ((price - iv) / iv * 100).toFixed(1) + '% por encima' : ((iv - price) / iv * 100).toFixed(1) + '% por debajo'} del valor intrínseco.`;
-  } else { just = 'Datos insuficientes para calcular un valor intrínseco fiable.'; }
-
-  return { intrinsicValue: iv, marginOfSafety: mos, entryPrice: entry, thesisText, priceJustification: just, ivPE, ivPFCF, ivConsensus, ivMethodCount };
+  return { 
+    thesisText, 
+    entryPrice: entry,
+    priceJustification: `El suggested entry price dinámico ajustado al perfil institucional es de <strong>$${entry?.toFixed(2) || 'N/A'}</strong>.`,
+    decision: { actionLabel, actionEmoji, positionRange: positionSizing?.range || '0%', strategy, horizon } 
+  };
 }

@@ -12,7 +12,12 @@ async function loadScores() {
   try {
     const res = await fetch('/api/scores');
     const data = await res.json();
-    if (!data.exists) { $('onboarding').style.display = 'flex'; $('dash-content').style.display = 'none'; return; }
+    if (!data.exists) { 
+      $('onboarding').style.display = 'flex'; $('dash-content').style.display = 'none'; 
+      // Auto-start if no data exists
+      setTimeout(() => $('refresh-btn').click(), 1000);
+      return; 
+    }
     allData = data;
     $('onboarding').style.display = 'none';
     $('dash-content').style.display = 'block';
@@ -25,6 +30,12 @@ async function loadScores() {
     renderTable(data.companies);
     renderCharts(valid);
     populateSectorFilter(data.companies);
+    
+    // Auto-refresh if older than 4 hours
+    if (Date.now() - d.getTime() > 4 * 60 * 60 * 1000) {
+      console.log('Datos antiguos, auto-actualizando...');
+      setTimeout(() => { $('refresh-btn').click(); }, 1500);
+    }
   } catch (e) { console.error('Failed to load scores:', e); }
 }
 
@@ -183,17 +194,19 @@ function renderCharts(companies) {
     .map(c => ({ ...c, gap: ((c.current_price - c.entry_price) / c.entry_price) * 100 }))
     .sort((a, b) => a.gap - b.gap).slice(0, 10);
 
-  new Chart($('chart-entry'), {
-    type: 'bar',
-    data: {
-      labels: withEntry.map(c => c.ticker),
-      datasets: [{ data: withEntry.map(c => parseFloat(c.gap.toFixed(1))),
-        backgroundColor: withEntry.map(c => c.gap <= 5 ? '#00d4aa99' : c.gap <= 15 ? '#fbbf2499' : '#ef444499'),
-        borderColor: withEntry.map(c => c.gap <= 5 ? '#00d4aa' : c.gap <= 15 ? '#fbbf24' : '#ef4444'), borderWidth: 1 }]
-    },
-    options: { indexAxis: 'y', responsive: true, plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => `${ctx.parsed.x.toFixed(1)}% sobre entrada` } } },
-      scales: { x: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#64748b', callback: v => v + '%' } }, y: { grid: { display: false }, ticks: { color: '#94a3b8', font: { size: 11 } } } } }
-  });
+  const entryEl = $('chart-entry-content');
+  if (entryEl) {
+    entryEl.innerHTML = withEntry.map(c => {
+      const col = c.gap <= 5 ? 'var(--accent)' : c.gap <= 15 ? 'var(--gold)' : 'var(--red)';
+      return `<div class="range52-row">
+        <a href="index.html?ticker=${c.ticker}" class="range52-ticker" style="text-decoration:none;color:var(--text);font-weight:600;display:inline-block;cursor:pointer;">${c.ticker}</a>
+        <div class="range52-bar-wrap" style="position:relative;background:rgba(255,255,255,0.05);height:20px;border-radius:4px;overflow:hidden;flex:1;cursor:pointer;" onclick="window.location.href='index.html?ticker=${c.ticker}'">
+          <div style="position:absolute;left:0;top:0;height:100%;background:${col}99;border-right:2px solid ${col};width:${Math.min(100, c.gap)}%;"></div>
+          <div style="position:absolute;left:8px;top:50%;transform:translateY(-50%);font-size:11px;font-weight:600;">${c.gap.toFixed(1)}% sobre entrada</div>
+        </div>
+      </div>`;
+    }).join('');
+  }
 
   // 3. Posición en Rango 52W (Top 20 por score)
   const with52w = companies.filter(c => c.week52_high && c.week52_low && c.current_price)
@@ -205,7 +218,7 @@ function renderCharts(companies) {
     const pos = Math.max(0, Math.min(100, c.pos52));
     const col = pos < 30 ? 'var(--accent)' : pos < 70 ? 'var(--gold)' : 'var(--red)';
     return `<div class="range52-row">
-      <span class="range52-ticker">${c.ticker}</span>
+      <a href="index.html?ticker=${c.ticker}" class="range52-ticker" style="text-decoration:none;color:var(--text);font-weight:600;display:inline-block;cursor:pointer;">${c.ticker}</a>
       <div class="range52-bar-wrap">
         <div class="range52-bar"><div class="range52-marker" style="left:${pos}%;background:${col}"></div></div>
         <div class="range52-labels"><span>$${c.week52_low.toFixed(0)}</span><span style="color:${col}">$${c.current_price.toFixed(0)} (${pos.toFixed(0)}%)</span><span>$${c.week52_high.toFixed(0)}</span></div>
@@ -217,18 +230,23 @@ function renderCharts(companies) {
   const topUpside = companies.filter(c => c.upside_potential != null && c.upside_potential > 0)
     .sort((a, b) => b.upside_potential - a.upside_potential).slice(0, 15);
 
-  new Chart($('chart-upside'), {
-    type: 'bar',
-    data: {
-      labels: topUpside.map(c => c.ticker),
-      datasets: [{ data: topUpside.map(c => c.upside_potential),
-        backgroundColor: topUpside.map(c => ({ 'STRONG BUY': '#00d4aa99', 'BUY': '#34d39999', 'HOLD': '#fbbf2499', 'SELL': '#f9731699', 'STRONG SELL': '#ef444499' }[c.verdict] || '#64748b99')),
-        borderColor: topUpside.map(c => ({ 'STRONG BUY': '#00d4aa', 'BUY': '#34d399', 'HOLD': '#fbbf24', 'SELL': '#f97316', 'STRONG SELL': '#ef4444' }[c.verdict] || '#64748b')),
-        borderWidth: 1 }]
-    },
-    options: { indexAxis: 'y', responsive: true, plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => `+${ctx.parsed.x.toFixed(1)}% upside` } } },
-      scales: { x: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#64748b', callback: v => '+' + v + '%' } }, y: { grid: { display: false }, ticks: { color: '#94a3b8', font: { size: 11 } } } } }
-  });
+  const upsideEl = $('chart-upside-content');
+  if (upsideEl) {
+    upsideEl.innerHTML = topUpside.map(c => {
+      const colMap = { 'STRONG BUY': 'var(--accent)', 'BUY': '#34d399', 'HOLD': 'var(--gold)', 'SELL': '#f97316', 'STRONG SELL': 'var(--red)' };
+      const col = colMap[c.verdict] || 'var(--text-muted)';
+      // Max upside in array to scale width
+      const maxUp = topUpside[0]?.upside_potential || 100;
+      const pct = (c.upside_potential / maxUp) * 100;
+      return `<div class="range52-row">
+        <a href="index.html?ticker=${c.ticker}" class="range52-ticker" style="text-decoration:none;color:var(--text);font-weight:600;display:inline-block;cursor:pointer;">${c.ticker}</a>
+        <div class="range52-bar-wrap" style="position:relative;background:rgba(255,255,255,0.05);height:20px;border-radius:4px;overflow:hidden;flex:1;cursor:pointer;" onclick="window.location.href='index.html?ticker=${c.ticker}'">
+          <div style="position:absolute;left:0;top:0;height:100%;background:${col};opacity:0.6;border-right:2px solid ${col};width:${pct}%;"></div>
+          <div style="position:absolute;left:8px;top:50%;transform:translateY(-50%);font-size:11px;font-weight:600;color:#fff;">+${c.upside_potential.toFixed(1)}% upside</div>
+        </div>
+      </div>`;
+    }).join('');
+  }
 }
 
 // --- Refresh ---

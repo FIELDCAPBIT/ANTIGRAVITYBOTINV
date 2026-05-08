@@ -12,48 +12,26 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // --- Yahoo Finance Auth ---
-let yfCookies = '';
-let yfCrumb = '';
-let yfCrumbTime = 0;
-const CRUMB_TTL = 25 * 60 * 1000;
-let crumbRefreshing = null; // mutex
+import yahooFinance from 'yahoo-finance2';
 
-async function refreshCrumb() {
-  console.log('  Refreshing Yahoo Finance crumb...');
-  const cookieRes = await fetch('https://fc.yahoo.com', { redirect: 'manual' });
-  const setCookies = cookieRes.headers.getSetCookie?.() || [];
-  yfCookies = setCookies.map(c => c.split(';')[0]).join('; ');
-  const crumbRes = await fetch('https://query2.finance.yahoo.com/v1/test/getcrumb', {
-    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Cookie': yfCookies }
-  });
-  if (!crumbRes.ok) throw new Error('Failed to get Yahoo crumb');
-  yfCrumb = await crumbRes.text();
-  yfCrumbTime = Date.now();
-  console.log('  Crumb OK');
-}
 
-async function ensureCrumb(force = false) {
-  if (!force && yfCrumb && Date.now() - yfCrumbTime < CRUMB_TTL) return;
-  if (crumbRefreshing) return crumbRefreshing;
-  crumbRefreshing = refreshCrumb().finally(() => { crumbRefreshing = null; });
-  return crumbRefreshing;
-}
 
-async function yahooFetch(url, retries = 2) {
+async function yahooFetch(url, retries = 3) {
+  const [base, query] = url.split('?');
+  const params = new URLSearchParams(query);
+  const queryOpts = Object.fromEntries(params.entries());
+  
   for (let attempt = 0; attempt <= retries; attempt++) {
-    await ensureCrumb(attempt > 0);
-    const sep = url.includes('?') ? '&' : '?';
-    const full = `${url}${sep}crumb=${encodeURIComponent(yfCrumb)}`;
-    const res = await fetch(full, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Cookie': yfCookies }
-    });
-    if (res.ok) return await res.json();
-    if (res.status === 401 && attempt < retries) {
-      yfCrumb = ''; yfCrumbTime = 0;
-      console.log(`  401 on attempt ${attempt + 1}, refreshing crumb...`);
-      continue;
+    try {
+      return await yahooFinance._fetch(base, queryOpts, { needsCrumb: true });
+    } catch (err) {
+      if ((err.message.includes('Too Many Requests') || err.message.includes('invalid json')) && attempt < retries) {
+        console.log(`⚠️ 429 Too Many Requests. Retrying in 4s... (Attempt ${attempt + 1}/${retries})`);
+        await new Promise(r => setTimeout(r, 4000));
+        continue;
+      }
+      throw err;
     }
-    throw new Error(`Yahoo ${res.status}: ${res.statusText}`);
   }
 }
 
@@ -75,14 +53,14 @@ app.get('/api/fundamentals/:symbol', async (req, res) => {
     const modules = [
       'assetProfile', 'financialData', 'defaultKeyStatistics', 'summaryDetail', 'price',
       'recommendationTrend', 'institutionOwnership', 'insiderHolders',
-      'netSharePurchaseActivity', 'calendarEvents'
+      'netSharePurchaseActivity', 'calendarEvents', 'earningsTrend'
     ].join(',');
 
     const tsTypes = [
       'annualTotalRevenue', 'annualOperatingIncome', 'annualNetIncome', 'annualNormalizedEBITDA',
       'annualFreeCashFlow', 'annualOperatingCashFlow', 'annualCapitalExpenditure',
       'annualStockholdersEquity', 'annualLongTermDebt', 'annualTotalDebt',
-      'annualCashAndCashEquivalents'
+      'annualCashAndCashEquivalents', 'annualTotalAssets'
     ].join(',');
 
     const period1 = Math.floor(Date.now() / 1000) - 6 * 365 * 86400;
@@ -302,6 +280,49 @@ app.get('/api/fundamentals/:symbol', async (req, res) => {
       else if (spyCloses.length >= 2) spyReturn1y = spyCloses[spyCloses.length - 1] / spyCloses[0] - 1;
     } catch (e) { /* ignore */ }
 
+    // --- Earnings Quality (from timeSeries) ---
+    let earningsQuality = null;
+    if (sortedDates.length > 0) {
+      const latest = seriesMap[sortedDates[0]];
+      const ni = latest.annualNetIncome;
+      const ocf = latest.annualOperatingCashFlow;
+      const fcfAnn = latest.annualFreeCashFlow;
+      const ta = latest.annualTotalAssets;
+      earningsQuality = {
+        netIncome: ni, operatingCashFlow: ocf, freeCashFlow: fcfAnn, totalAssets: ta,
+        cashConversion: (ni && ni !== 0 && fcfAnn != null) ? fcfAnn / ni : null,
+        accrualsRatio: (ni != null && ocf != null && ta && ta > 0) ? (ni - ocf) / ta : null
+      };
+    }
+
+    // --- Earnings Revisions (from earningsTrend module) ---
+    let earningsRevisions = null;
+    const et = r.earningsTrend;
+    if (et && et.trend) {
+      const trends = et.trend;
+      const current0 = trends.find(t => t.period === '0q') || {};
+      const currentY = trends.find(t => t.period === '0y') || {};
+      const nextY = trends.find(t => t.period === '+1y') || {};
+      const extract = (t) => {
+        const ee = t.earningsEstimate || {};
+        const re = t.revenueEstimate || {};
+        return {
+          epsEst: raw(ee.avg), epsPrior7d: raw(ee['7daysAgo']),
+          epsPrior30d: raw(ee['30daysAgo']), epsPrior90d: raw(ee['90daysAgo']),
+          revEst: raw(re.avg), revPrior7d: raw(re['7daysAgo']),
+          revPrior30d: raw(re['30daysAgo']), revPrior90d: raw(re['90daysAgo']),
+          epsGrowth: raw(ee.growth),
+          numUp: ee.numberOfAnalystsUp?.raw || 0,
+          numDown: ee.numberOfAnalystsDown?.raw || 0
+        };
+      };
+      earningsRevisions = {
+        currentQuarter: extract(current0),
+        currentYear: extract(currentY),
+        nextYear: extract(nextY)
+      };
+    }
+
     const result = {
       profile: {
         companyName: p.longName || p.shortName || symbol, price, marketCap,
@@ -322,11 +343,13 @@ app.get('/api/fundamentals/:symbol', async (req, res) => {
       metricsTTM: {
         evToEBITDATTM: evEbitda, returnOnInvestedCapitalTTM: roic,
         returnOnCapitalEmployedTTM: roic, returnOnEquityTTM: roe,
-        freeCashFlowPerShareTTM: fcf && shares ? fcf / shares : null
+        freeCashFlowPerShareTTM: fcf && shares ? fcf / shares : null,
+        freeCashFlow: fcf, operatingCashFlow: raw(fd.operatingCashflow)
       },
       ratiosHist: historicalRatios, metricsHist: historicalRatios,
       analystTargets, recTrend, earningsDate, dividendDate, exDividendDate,
-      institutions, insiders, insiderActivity, technicals, spyReturn1y
+      institutions, insiders, insiderActivity, technicals, spyReturn1y,
+      earningsQuality, earningsRevisions
     };
 
     res.json(result);

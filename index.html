@@ -51,7 +51,6 @@
     </div>
 
     <div class="report" id="report">
-      <!-- Header -->
       <div class="report-header fade-in">
         <div class="report-company" id="r-company"></div>
         <div class="report-meta">
@@ -68,7 +67,7 @@
         <div id="r-context" class="narrative-text"></div>
       </div>
 
-      <!-- S2: Valoración -->
+      <!-- S2: Valoración + Lifecycle + MeanReversion + EarningsQuality -->
       <div class="section-card" id="sec-2">
         <div class="section-title"><span class="section-num">2</span> Valoración Histórica & Sectorial</div>
         <div style="overflow-x:auto;">
@@ -78,6 +77,9 @@
           </table>
         </div>
         <div class="synthesis" id="r-synthesis"></div>
+        <div id="r-earnings-quality" style="margin-top:16px;"></div>
+        <div id="r-lifecycle" style="margin-top:16px;"></div>
+        <div id="r-mean-reversion" style="margin-top:16px;"></div>
       </div>
 
       <!-- S3: Consenso Analistas -->
@@ -86,33 +88,39 @@
         <div id="r-analyst-content"></div>
       </div>
 
-      <!-- S4: Insider & Institucional -->
+      <!-- S4 NEW: DCF con Escenarios -->
       <div class="section-card" id="sec-4">
-        <div class="section-title"><span class="section-num">4</span> Actividad Insider & Propiedad Institucional</div>
+        <div class="section-title"><span class="section-num">4</span> DCF — Valoración por Flujo de Caja Descontado</div>
+        <div id="r-dcf-content"></div>
+      </div>
+
+      <!-- S5: Insider -->
+      <div class="section-card" id="sec-5">
+        <div class="section-title"><span class="section-num">5</span> Actividad Insider & Propiedad Institucional</div>
         <div id="r-insider-content"></div>
       </div>
 
-      <!-- S5: Moat -->
-      <div class="section-card" id="sec-5">
-        <div class="section-title"><span class="section-num">5</span> Ventaja Competitiva (MOAT) & Riesgos</div>
+      <!-- S6: Moat -->
+      <div class="section-card" id="sec-6">
+        <div class="section-title"><span class="section-num">6</span> Ventaja Competitiva (MOAT) & Riesgos</div>
         <div id="r-moat-content"></div>
       </div>
 
-      <!-- S6: Technical Levels -->
-      <div class="section-card" id="sec-6">
-        <div class="section-title"><span class="section-num">6</span> Technical Levels & Momentum</div>
+      <!-- S7: Technical -->
+      <div class="section-card" id="sec-7">
+        <div class="section-title"><span class="section-num">7</span> Technical Levels & Momentum</div>
         <div id="r-tech-content"></div>
       </div>
 
-      <!-- S7: News & Sentiment -->
-      <div class="section-card" id="sec-7">
-        <div class="section-title"><span class="section-num">7</span> Últimas Noticias & Sentimiento</div>
+      <!-- S8: News -->
+      <div class="section-card" id="sec-8">
+        <div class="section-title"><span class="section-num">8</span> Últimas Noticias & Sentimiento</div>
         <div id="r-news-content"><p style="color:var(--text-muted)">Cargando noticias...</p></div>
       </div>
 
-      <!-- S8: Alpha Score -->
-      <div class="section-card" id="sec-8">
-        <div class="section-title"><span class="section-num">8</span> Veredicto & Alpha Score</div>
+      <!-- S9: Alpha Score -->
+      <div class="section-card" id="sec-9">
+        <div class="section-title"><span class="section-num">9</span> Veredicto & Alpha Score</div>
         <div class="score-section">
           <div class="score-circle-wrap">
             <svg viewBox="0 0 120 120" width="120" height="120">
@@ -127,32 +135,25 @@
           <div>
             <div class="verdict-badge" id="r-verdict"></div>
             <div class="score-breakdown" style="margin-top:20px;">
-              <div class="score-bar-row"><span class="score-bar-label">Val. Histórica</span><div class="score-bar-track"><div class="score-bar-fill" id="bar-hist"></div></div><span class="score-bar-val">-</span></div>
-              <div class="score-bar-row"><span class="score-bar-label">Val. Sectorial</span><div class="score-bar-track"><div class="score-bar-fill" id="bar-sector"></div></div><span class="score-bar-val">-</span></div>
+              <div class="score-bar-row"><span class="score-bar-label">Calidad Negocio</span><div class="score-bar-track"><div class="score-bar-fill" id="bar-biz"></div></div><span class="score-bar-val">-</span></div>
               <div class="score-bar-row"><span class="score-bar-label">Fortaleza MOAT</span><div class="score-bar-track"><div class="score-bar-fill" id="bar-moat"></div></div><span class="score-bar-val">-</span></div>
-              <div class="score-bar-row"><span class="score-bar-label">Calidad Tendencia</span><div class="score-bar-track"><div class="score-bar-fill" id="bar-trend"></div></div><span class="score-bar-val">-</span></div>
+              <div class="score-bar-row"><span class="score-bar-label">Valoración</span><div class="score-bar-track"><div class="score-bar-fill" id="bar-val"></div></div><span class="score-bar-val">-</span></div>
               <div class="score-bar-row"><span class="score-bar-label">Salud Financiera</span><div class="score-bar-track"><div class="score-bar-fill" id="bar-health"></div></div><span class="score-bar-val">-</span></div>
-              <div class="score-bar-row"><span class="score-bar-label">Sentimiento Analistas</span><div class="score-bar-track"><div class="score-bar-fill" id="bar-analyst"></div></div><span class="score-bar-val">-</span></div>
+              <div class="score-bar-row"><span class="score-bar-label">Momentum Fund.</span><div class="score-bar-track"><div class="score-bar-fill" id="bar-momentum"></div></div><span class="score-bar-val">-</span></div>
               <div class="score-bar-row" id="score-weights-row" style="margin-top:8px;font-size:11px;color:var(--text-muted)"></div>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- S9: Tesis -->
-      <div class="section-card" id="sec-9">
-        <div class="section-title"><span class="section-num">9</span> Tesis de Inversión & Estrategia de Entrada</div>
+      <!-- S10: Tesis + Decisión Estructurada -->
+      <div class="section-card" id="sec-10">
+        <div class="section-title"><span class="section-num">10</span> Tesis de Inversión & Decisión</div>
         <div class="thesis-text" id="r-thesis"></div>
-        <div class="entry-price-card">
-          <div>
-            <div class="entry-price-label">Precio de Entrada Sugerido</div>
-            <div class="entry-price-value" id="r-entry-price">-</div>
-          </div>
-          <div class="entry-price-detail" id="r-price-just"></div>
-        </div>
+        <div id="r-decision-panel" style="margin-top:16px;"></div>
       </div>
     </div>
   </div>
-  <script type="module" src="js/app.js?v=4"></script>
+  <script type="module" src="js/app.js?v=5"></script>
 </body>
 </html>

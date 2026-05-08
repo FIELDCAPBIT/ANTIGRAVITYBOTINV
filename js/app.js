@@ -39,7 +39,8 @@ async function runReport(){
 }
 
 function renderReport(r){
-  const{context,historical,sector,moat,analyst,insiderData,techData,scoring,thesis,meta}=r;
+  const{context,historical,sector,moat,analyst,insiderData,techData,scoring,thesis,meta,
+    earningsQual,lifecycle,meanReversion,earningsRevisions,dcf,positionSizing}=r;
   $('r-company').innerHTML=`${context.companyName} <span class="ticker">($${meta.ticker})</span>`;
   $('r-sector').textContent=context.sector||meta.sector;
   $('r-industry').textContent=context.industry||meta.industry;
@@ -59,7 +60,6 @@ function renderReport(r){
     +R('Rev. Growth YoY',historical.current.revGrowth,historical.avg5y.revGrowth,sector.sectorAvg.revGrowth,historical.deviation.revGrowth,sector.deviation.revGrowth,formatPercent,true)
     +R('Net Debt/EBITDA',historical.current.netDebtEbitda,historical.avg5y.netDebtEbitda,sector.sectorAvg.netDebtEbitda,historical.deviation.netDebtEbitda,sector.deviation.netDebtEbitda,v=>{if(v==null)return 'N/A';if(v<0)return'Net Cash';return v.toFixed(1)+'x';},false,historical.current.netDebtEbitda!=null&&historical.current.netDebtEbitda<0)
     +R('Op. Margin',historical.current.opMargin,historical.avg5y.opMargin,sector.sectorAvg.opMargin,historical.deviation.opMargin,sector.deviation.opMargin,formatPercent,true);
-  // ERROR 4: P/FCF contextual note when > 40x
   if(historical.current.pfcf!=null && historical.current.pfcf > 40){
     tb.innerHTML+=`<tr><td colspan="6" style="font-size:12px;color:var(--gold);padding:8px 12px;font-style:italic;">⚠️ El FCF reportado puede estar comprimido por inversiones extraordinarias en capex (ej: infraestructura cloud/IA). Considera analizar el FCF normalizado.</td></tr>`;
   }
@@ -71,12 +71,23 @@ function renderReport(r){
   if(aSD!==null){if(aSD<-0.05)sy.push(`<strong>${Math.abs(aSD*100).toFixed(0)}% más barata</strong> que la media del sector.`);else if(aSD>0.05)sy.push(`Lleva una <strong>prima del ${(aSD*100).toFixed(0)}%</strong> sobre sus peers del sector.`);}
   $('r-synthesis').innerHTML=sy.join(' ');
 
+  // New v3.0 renders in S2
+  renderEarningsQuality(earningsQual);
+  renderLifecycle(lifecycle);
+  renderMeanReversion(meanReversion);
+
+  // S3: Earnings Revisions removed by user request
+
   renderAnalyst(analyst,context.price);
+
+  // S5: DCF
+  renderDCF(dcf,context.price);
+
   renderInsider(insiderData);
   renderMoat(moat,meta,historical.current);
   renderTech(techData,context.price,meta.ticker);
   renderScore(scoring);
-  renderThesis(thesis);
+  renderThesis(thesis, positionSizing);
   renderNews(meta.ticker);
 
   reportEl.classList.add('show');
@@ -239,19 +250,102 @@ function renderScore(s){
   const vb=$('r-verdict');vb.textContent=s.verdict;
   const vm={'STRONG BUY':'verdict-strongbuy','BUY':'verdict-buy','HOLD':'verdict-hold','SELL':'verdict-sell','STRONG SELL':'verdict-strongsell'};
   vb.className='verdict-badge '+(vm[s.verdict]||'verdict-hold');
-  sBar('bar-hist',s.histScore);sBar('bar-sector',s.secScore);sBar('bar-moat',s.moatScore);
-  sBar('bar-trend',s.trendScore);sBar('bar-health',s.healthScore);sBar('bar-analyst',s.analystScore);
-  // Show scoring weights in UI
+  sBar('bar-biz',s.bizQuality);sBar('bar-moat',s.moatScore);sBar('bar-val',s.valuation);
+  sBar('bar-health',s.healthScore);sBar('bar-momentum',s.momentum);
   const wr=$('score-weights-row');
   if(wr) wr.textContent=`Ponderaciones: ${Object.values(SCORE_WEIGHTS).map(w=>`${w.label} ${(w.weight*100).toFixed(0)}%`).join(' · ')}`;
 }
 
-function renderThesis(t){
-  const el=$('r-thesis');const ps=t.thesisText.split('\n\n');
-  const titles=['Caso de Inversión','Posición Competitiva & Vectores de Crecimiento','Argumento de Valoración','Evaluación Riesgo/Retorno'];
-  el.innerHTML=ps.map((p,i)=>`<div class="thesis-paragraph"><div class="thesis-paragraph-title">${titles[i]||''}</div><div class="thesis-paragraph-text">${p}</div></div>`).join('');
-  $('r-entry-price').textContent=t.entryPrice?`$${t.entryPrice.toFixed(2)}`:'N/A';
-  $('r-price-just').textContent=t.priceJustification;
+// Removed renderPositionSizing
+
+function renderThesis(t, ps){
+  const el=$('r-thesis');
+  el.innerHTML=`<div class="thesis-paragraph"><div class="thesis-paragraph-text">${t.thesisText}</div></div>`;
+
+  // 4.1: Structured Decision Panel
+  const dp=$('r-decision-panel');
+  if(!dp)return;
+  const d=t.decision;
+  const borderC=d.actionEmoji==='📈'||d.actionEmoji==='🟢'?'var(--accent)':d.actionEmoji==='🔴'?'var(--red)':'var(--gold)';
+  dp.innerHTML=`<div style="border:1px solid ${borderC};border-radius:12px;padding:20px;background:rgba(0,0,0,0.2);">
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">DECISIÓN DE INVERSIÓN</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div><div style="font-size:11px;color:var(--text-muted);">ACCIÓN RECOMENDADA</div><div style="font-size:20px;font-weight:700;color:${borderC}">${d.actionEmoji} ${d.actionLabel}</div></div>
+      <div><div style="font-size:11px;color:var(--text-muted);">TAMAÑO POSICIÓN & CONVICCIÓN</div><div style="font-size:20px;font-weight:700;">${d.positionRange} cartera</div><div style="font-size:12px;color:var(--text-secondary);">${ps ? ps.emoji + ' ' + ps.category : ''}</div></div>
+      <div><div style="font-size:11px;color:var(--text-muted);">HORIZONTE</div><div style="font-size:16px;">${d.horizon}</div></div>
+      <div><div style="font-size:11px;color:var(--text-muted);">ESTRATEGIA</div><div style="font-size:16px;">${d.strategy}</div></div>
+    </div>
+  </div>
+  <div class="entry-price-card" style="margin-top:16px;">
+    <div>
+      <div class="entry-price-label">Suggested Entry Price</div>
+      <div class="entry-price-value">$${t.entryPrice != null ? t.entryPrice.toFixed(2) : 'N/A'}</div>
+    </div>
+    <div class="entry-price-detail">${t.priceJustification}</div>
+  </div>`;
+}
+
+// --- v3.0 New Render Functions ---
+function renderEarningsQuality(eq) {
+  const el = $('r-earnings-quality'); if (!el) return;
+  if (!eq || eq.cashConversion == null) { el.innerHTML = ''; return; }
+  const fmtLN = v => v != null ? (Math.abs(v) >= 1e9 ? (v/1e9).toFixed(1)+'B' : (v/1e6).toFixed(0)+'M') : 'N/A';
+  el.innerHTML = `<div style="border-top:1px solid rgba(255,255,255,0.06);padding-top:12px;">
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">CALIDAD DE EARNINGS (1.3)</div>
+    <div class="analyst-grid">
+      <div class="analyst-stat-card"><div class="analyst-stat-label">Cash Conversion (FCF/NI)</div>
+        <div class="analyst-stat-value" style="color:${eq.grade==='alta'?'var(--accent)':eq.grade==='baja'?'var(--red)':'var(--gold)'}">
+          ${eq.emoji} ${eq.cashConversion != null ? (eq.cashConversion*100).toFixed(0)+'%' : 'N/A'}</div>
+        <div class="analyst-stat-sub">Calidad ${eq.grade}</div></div>
+      <div class="analyst-stat-card"><div class="analyst-stat-label">Accruals Ratio</div>
+        <div class="analyst-stat-value">${eq.accrualsRatio != null ? (eq.accrualsRatio*100).toFixed(1)+'%' : 'N/A'}</div>
+        <div class="analyst-stat-sub">${eq.accrualsRatio != null && eq.accrualsRatio < 0.05 ? '✓ Bajo (bueno)' : '⚠ Elevado'}</div></div>
+    </div></div>`;
+}
+
+function renderLifecycle(lc) {
+  const el = $('r-lifecycle'); if (!el) return;
+  const c = lc.phase <= 2 ? 'var(--accent)' : lc.phase === 3 ? 'var(--gold)' : 'var(--red)';
+  el.innerHTML = `<div style="border-top:1px solid rgba(255,255,255,0.06);padding-top:12px;">
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">CICLO DE VIDA DEL NEGOCIO (2.3)</div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+      <span style="font-size:28px;">${lc.emoji}</span>
+      <div><div style="font-size:16px;font-weight:700;color:${c}">Fase ${lc.phase} — ${lc.label}</div>
+        <div style="font-size:13px;color:var(--text-secondary);margin-top:4px;">${lc.desc}</div></div>
+    </div></div>`;
+}
+
+function renderMeanReversion(mr) {
+  const el = $('r-mean-reversion'); if (!el) return;
+  if (mr.score == null) { el.innerHTML = ''; return; }
+  const c = mr.score >= 7 ? 'var(--red)' : mr.score <= 3 ? 'var(--accent)' : 'var(--gold)';
+  const w = (mr.score / 10 * 100);
+  el.innerHTML = `<div style="border-top:1px solid rgba(255,255,255,0.06);padding-top:12px;">
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">MEAN REVERSION SCORE (2.4)</div>
+    <div style="display:flex;align-items:center;gap:12px;">
+      <div style="flex:1;">
+        <div class="score-bar-track"><div class="score-bar-fill" style="width:${w}%;background:${c};transition:width 0.8s ease;"></div></div>
+      </div>
+      <span style="font-size:18px;font-weight:700;color:${c}">${mr.score}/10</span>
+      <span style="font-size:13px;color:var(--text-secondary)">Prob. reversión: ${mr.label}</span>
+    </div>
+    <div style="font-size:12px;color:var(--text-muted);margin-top:6px;">${mr.desc}</div></div>`;
+}
+
+// Removed renderEarningsRevisions
+
+function renderDCF(dcf, price) {
+  const el = $('r-dcf-content'); if (!el) return;
+  if (!dcf || !dcf.available) { el.innerHTML = '<p style="color:var(--text-muted)">DCF no disponible — se requiere FCF positivo para el cálculo.</p>'; return; }
+  const fmtP = v => '$' + v.toFixed(2);
+  const uC = dcf.upside >= 0 ? 'var(--accent)' : 'var(--red)';
+  let h = `<div style="overflow-x:auto;"><table class="data-table"><thead><tr><th>Escenario</th><th>Prob.</th><th>Crec. Revenue</th><th>Ajuste Margen</th><th>Valor / Acción</th></tr></thead><tbody>`;
+  h += `<tr><td>🐻 ${dcf.bear.label}</td><td>${(dcf.bear.prob*100).toFixed(1)}%</td><td>${(dcf.bear.growthRate*100).toFixed(0)}%</td><td>${(dcf.bear.marginAdj*100).toFixed(0)}pp</td><td>${fmtP(dcf.bear.value)}</td></tr>`;
+  h += `<tr><td>📊 ${dcf.base.label}</td><td>${(dcf.base.prob*100).toFixed(1)}%</td><td>${(dcf.base.growthRate*100).toFixed(0)}%</td><td>0pp</td><td>${fmtP(dcf.base.value)}</td></tr>`;
+  h += `<tr><td>🚀 ${dcf.bull.label}</td><td>${(dcf.bull.prob*100).toFixed(1)}%</td><td>${(dcf.bull.growthRate*100).toFixed(0)}%</td><td>+${(dcf.bull.marginAdj*100).toFixed(0)}pp</td><td>${fmtP(dcf.bull.value)}</td></tr>`;
+  h += `<tr style="font-weight:700;border-top:2px solid rgba(255,255,255,0.1);"><td>Valor Ponderado</td><td></td><td></td><td></td><td style="color:${uC}">${fmtP(dcf.weighted)} <span style="font-size:13px;margin-left:8px;font-weight:400">(${dcf.upside>=0?'+':''}${(dcf.upside*100).toFixed(1)}% upside)</span></td></tr>`;
+  h += `</tbody></table></div>`;
+  el.innerHTML = h;
 }
 
 function buildValRow(name,cur,a5y,sa,hd,sd,fn,hib,isNetCash){
