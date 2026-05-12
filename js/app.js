@@ -80,8 +80,8 @@ function renderReport(r){
 
   renderAnalyst(analyst,context.price);
 
-  // S5: DCF
-  renderDCF(dcf,context.price);
+  // S4: DCF — removed by user request
+  const sec4 = document.getElementById('sec-4'); if(sec4) sec4.style.display = 'none';
 
   renderInsider(insiderData);
   renderMoat(moat,meta,historical.current);
@@ -138,9 +138,10 @@ function renderInsider(d){
     h+=`<div class="insider-activity-cards"><div class="insider-act-card"><div class="insider-act-num" style="color:var(--accent)">${formatLargeNumber(act.buyShares||0)}</div><div class="insider-act-label">Acciones Compradas</div></div><div class="insider-act-card"><div class="insider-act-num" style="color:var(--red)">${formatLargeNumber(act.sellShares||0)}</div><div class="insider-act-label">Acciones Vendidas</div></div><div class="insider-act-card"><div class="insider-act-num" style="color:${nc}">${formatLargeNumber(act.netShares||0)}</div><div class="insider-act-label">Actividad Neta</div></div></div>`;
   }
   if(d.institutions.length>0){
+    const topInst = d.institutions.slice(0, 3);
     h+=`<div style="font-size:13px;color:var(--text-muted);margin:16px 0 8px;">PRINCIPALES TITULARES INSTITUCIONALES</div>`;
     h+=`<table class="inst-table"><thead><tr><th>Institución</th><th>% Posición</th><th>Fecha Reporte</th></tr></thead><tbody>`;
-    d.institutions.forEach(i=>{h+=`<tr><td>${i.name}</td><td>${i.pctHeld!=null?(i.pctHeld*100).toFixed(2)+'%':'N/A'}</td><td>${i.reportDate||'N/A'}</td></tr>`;});
+    topInst.forEach(i=>{h+=`<tr><td>${i.name}</td><td>${i.pctHeld!=null?(i.pctHeld*100).toFixed(2)+'%':'N/A'}</td><td>${i.reportDate||'N/A'}</td></tr>`;});
     h+=`</tbody></table>`;
   }
   el.innerHTML=h;
@@ -289,17 +290,12 @@ function renderThesis(t, ps){
 function renderEarningsQuality(eq) {
   const el = $('r-earnings-quality'); if (!el) return;
   if (!eq || eq.cashConversion == null) { el.innerHTML = ''; return; }
-  const fmtLN = v => v != null ? (Math.abs(v) >= 1e9 ? (v/1e9).toFixed(1)+'B' : (v/1e6).toFixed(0)+'M') : 'N/A';
+  const gradeColor = eq.grade==='alta'?'var(--accent)':eq.grade==='baja'?'var(--red)':'var(--gold)';
   el.innerHTML = `<div style="border-top:1px solid rgba(255,255,255,0.06);padding-top:12px;">
     <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">CALIDAD DE EARNINGS (1.3)</div>
-    <div class="analyst-grid">
-      <div class="analyst-stat-card"><div class="analyst-stat-label">Cash Conversion (FCF/NI)</div>
-        <div class="analyst-stat-value" style="color:${eq.grade==='alta'?'var(--accent)':eq.grade==='baja'?'var(--red)':'var(--gold)'}">
-          ${eq.emoji} ${eq.cashConversion != null ? (eq.cashConversion*100).toFixed(0)+'%' : 'N/A'}</div>
-        <div class="analyst-stat-sub">Calidad ${eq.grade}</div></div>
-      <div class="analyst-stat-card"><div class="analyst-stat-label">Accruals Ratio</div>
-        <div class="analyst-stat-value">${eq.accrualsRatio != null ? (eq.accrualsRatio*100).toFixed(1)+'%' : 'N/A'}</div>
-        <div class="analyst-stat-sub">${eq.accrualsRatio != null && eq.accrualsRatio < 0.05 ? '✓ Bajo (bueno)' : '⚠ Elevado'}</div></div>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <span style="font-size:24px;">${eq.emoji}</span>
+      <span style="font-size:16px;font-weight:600;color:${gradeColor}">Calidad ${eq.grade}</span>
     </div></div>`;
 }
 
@@ -361,30 +357,254 @@ function avgDev(ds){const v=ds.filter(d=>d!=null);return v.length?v.reduce((a,b)
 function showError(m){errorEl.textContent=m;errorEl.classList.add('show');}
 function hideError(){errorEl.classList.remove('show');}
 
-// Risk title translator EN→ES
-const RISK_DICT = {
-  'disruption':'disrupción','regulatory':'regulatoria','pressure':'presión','competition':'competencia',
-  'risk':'riesgo','volatility':'volatilidad','decline':'declive','inflation':'inflación',
-  'uncertainty':'incertidumbre','constraints':'restricciones','recession':'recesión',
-  'headwinds':'vientos en contra','litigation':'litigios','integration':'integración',
-  'cyclicality':'ciclicidad','spending':'gasto','compression':'compresión',
-  'market':'mercado','impact':'impacto','cost':'coste','fee':'comisión','fees':'comisiones',
-  'pricing':'fijación de precios','downturn':'recesión','losses':'pérdidas',
-  'capital':'capital','requirements':'requisitos','growth':'crecimiento',
-  'slowdown':'desaceleración','changes':'cambios','sensitivity':'sensibilidad',
-  'exposure':'exposición','alternatives':'alternativas','cuts':'recortes',
-  'patent cliff':'vencimiento de patentes','pipeline':'pipeline',
-  'antitrust':'antimonopolio','intense':'intensa','emerging':'emergentes',
-  'from':'de','on':'sobre','in':'en','of':'de','and':'y','for':'para',
-  'Fintech':'Fintech','AI':'IA','GLP-1':'GLP-1'
+// Risk title translator EN→ES — comprehensive dictionary
+const RISK_TRANSLATIONS = {
+  // Full phrase translations (checked first)
+  'Niche market size': 'Mercado nicho de tamaño reducido',
+  'Competition from larger memory players': 'Competencia de grandes fabricantes de memoria',
+  'Pre-profitability risk': 'Riesgo de falta de rentabilidad',
+  'GaN adoption pace': 'Ritmo de adopción de GaN',
+  'Project execution risk': 'Riesgo de ejecución de proyectos',
+  'Energy transition pace': 'Ritmo de transición energética',
+  'Semiconductor capex cyclicality': 'Ciclicidad del capex en semiconductores',
+  'Customer concentration': 'Concentración de clientes',
+  'Semiconductor cycle exposure': 'Exposición al ciclo de semiconductores',
+  'End-market diversification risk': 'Riesgo de diversificación del mercado final',
+  'Commodity pricing pressure': 'Presión en precios de materias primas',
+  'Battery technology competition': 'Competencia en tecnología de baterías',
+  'Niche market risk': 'Riesgo de mercado nicho',
+  'Quartz timing competition': 'Competencia de cristales de cuarzo',
+  'IoT adoption pace': 'Ritmo de adopción de IoT',
+  'Competition from larger players': 'Competencia de empresas más grandes',
+  'Semiconductor cycle dependency': 'Dependencia del ciclo de semiconductores',
+  'Technology node transitions': 'Transiciones de nodos tecnológicos',
+  'Geopolitical risk in Asia': 'Riesgo geopolítico en Asia',
+  'Broadband market cyclicality': 'Ciclicidad del mercado de banda ancha',
+  'Integration risk': 'Riesgo de integración',
+  'Small-cap execution risk': 'Riesgo de ejecución de small-cap',
+  'Competition from larger AI players': 'Competencia de grandes empresas de IA',
+  'Digital disruption of physical storage': 'Disrupción digital del almacenamiento físico',
+  'Interest rate sensitivity': 'Sensibilidad a tipos de interés',
+  'Supply chain disruption': 'Disrupción de cadena de suministro',
+  'Power price volatility': 'Volatilidad del precio de la energía',
+  'Regulatory risk': 'Riesgo regulatorio',
+  'Path to profitability timeline': 'Plazo para alcanzar rentabilidad',
+  'Enterprise sales execution': 'Ejecución en ventas enterprise',
+  'Semiconductor capex cycle': 'Ciclo de capex en semiconductores',
+  'Technology transition risk': 'Riesgo de transición tecnológica',
+  'Patent portfolio risk': 'Riesgo de cartera de patentes',
+  'Memory market cyclicality': 'Ciclicidad del mercado de memoria',
+  'Automotive cycle risk': 'Riesgo del ciclo automotriz',
+  'Competition from TI and ADI': 'Competencia de TI y ADI',
+  'Factory automation cyclicality': 'Ciclicidad de automatización industrial',
+  'Competition from Keyence': 'Competencia de Keyence',
+  'Lidar market uncertainty': 'Incertidumbre del mercado lidar',
+  'Cash burn rate': 'Tasa de quema de efectivo',
+  'Pre-revenue scaling risk': 'Riesgo de escalado pre-ingresos',
+  'Pricing pressure': 'Presión en precios',
+  'Nuclear regulatory risk': 'Riesgo regulatorio nuclear',
+  'Contract concentration': 'Concentración de contratos',
+  'RISC-V open-source competition': 'Competencia open-source RISC-V',
+  'Royalty rate pressure': 'Presión en tasas de royalties',
+  'Bitcoin price volatility': 'Volatilidad del precio de Bitcoin',
+  'Energy cost volatility': 'Volatilidad del coste energético',
+  'Data center spending volatility': 'Volatilidad del gasto en centros de datos',
+  'Construction cycle sensitivity': 'Sensibilidad al ciclo de construcción',
+  'Labor cost inflation': 'Inflación en costes laborales',
+  'Pre-revenue technology risk': 'Riesgo tecnológico pre-ingresos',
+  'Regulatory approval uncertainty': 'Incertidumbre en aprobación regulatoria',
+  'Telecom capex cyclicality': 'Ciclicidad del capex en telecomunicaciones',
+  'Rare earth price volatility': 'Volatilidad del precio de tierras raras',
+  'Pre-revenue execution risk': 'Riesgo de ejecución pre-ingresos',
+  'Technology execution risk': 'Riesgo de ejecución tecnológica',
+  'Capital intensity': 'Intensidad de capital',
+  'Launch competition from SpaceX': 'Competencia de lanzamiento de SpaceX',
+  'Custom silicon competition': 'Competencia en silicio personalizado',
+  'Outage reputational risk': 'Riesgo reputacional por interrupciones',
+  'Microsoft security competition': 'Competencia de seguridad de Microsoft',
+  'Fiber deployment pace': 'Ritmo de despliegue de fibra',
+  'SMB customer churn': 'Rotación de clientes PYME',
+  'Hyperscaler competition': 'Competencia de hiperescaladores',
+  'Wind turbine losses': 'Pérdidas en turbinas eólicas',
+  'Energy transition execution': 'Ejecución de transición energética',
+  '5G capex cycle': 'Ciclo de capex en 5G',
+  'Ericsson competition': 'Competencia de Ericsson',
+  'Utility capex cyclicality': 'Ciclicidad del capex en utilities',
+  'Raw material costs': 'Costes de materias primas',
+  'Energy cost risk': 'Riesgo de coste energético',
+  'AI spending sustainability': 'Sostenibilidad del gasto en IA',
+  'Competition from hyperscalers': 'Competencia de hiperescaladores',
+  'Industrial cycle downturn': 'Recesión del ciclo industrial',
+  'Raw material cost pressure': 'Presión en costes de materias primas',
+  'Data center build-out slowdown': 'Desaceleración en construcción de centros de datos',
+  'Supply chain constraints': 'Restricciones de cadena de suministro',
+  'China competition': 'Competencia de China',
+  'Industrial cycle sensitivity': 'Sensibilidad al ciclo industrial',
+  'Portfolio transformation risk': 'Riesgo de transformación del portfolio',
+  'Energy capex cyclicality': 'Ciclicidad del capex energético',
+  'Project backlog risk': 'Riesgo de cartera de proyectos',
+  'Labor shortage': 'Escasez de mano de obra',
+  'Commodity price volatility': 'Volatilidad de precios de materias primas',
+  'Permitting risk': 'Riesgo de permisos',
+  'Wafer fab equipment cycle downturn': 'Caída del ciclo de equipos para fábricas de obleas',
+  'China revenue restrictions': 'Restricciones de ingresos en China',
+  'Uranium price volatility': 'Volatilidad del precio del uranio',
+  'Nuclear sentiment shifts': 'Cambios de sentimiento hacia la energía nuclear',
+  'Console cycle risk': 'Riesgo del ciclo de consolas',
+  'Mobile gaming competition': 'Competencia del gaming móvil',
+  'Data center spending cyclicality': 'Ciclicidad del gasto en centros de datos',
+  'Cisco competition': 'Competencia de Cisco',
+  'Automotive adoption pace': 'Ritmo de adopción automotriz',
+  'PC market cyclicality': 'Ciclicidad del mercado de PC',
+  'Server margin pressure': 'Presión en márgenes de servidores',
+  'Power price volatility': 'Volatilidad del precio de la energía',
+  'Construction cycle': 'Ciclo de construcción',
+  'Acquisition integration risk': 'Riesgo de integración de adquisiciones',
+  'Retail tenant risk': 'Riesgo de inquilinos minoristas',
+  'Construction cycle downturn': 'Caída del ciclo de construcción',
+  'China economic slowdown': 'Desaceleración económica de China',
+  'Analog chip demand cyclicality': 'Ciclicidad de demanda de chips analógicos',
+  'Geopolitical risk': 'Riesgo geopolítico',
+  'Intense competition from NVIDIA in AI': 'Competencia intensa de NVIDIA en IA',
+  'Customer concentration risk': 'Riesgo de concentración de clientes',
+  'VMware integration execution': 'Ejecución de integración de VMware',
+  'Memory price cyclicality': 'Ciclicidad de precios de memoria',
+  'Oversupply risk': 'Riesgo de sobreoferta',
+  'Semiconductor test cycle': 'Ciclo de pruebas de semiconductores',
+  'Capex cycle downturn': 'Caída del ciclo de capex',
+  'Natural gas price volatility': 'Volatilidad del precio del gas natural',
+  'Renewable energy competition': 'Competencia de energías renovables',
+  'Defense budget uncertainty': 'Incertidumbre del presupuesto de defensa',
+  'Nuclear regulation risk': 'Riesgo de regulación nuclear',
+  'Government contract dependency': 'Dependencia de contratos gubernamentales',
+  'Interest rate pressure': 'Presión por tipos de interés',
+  'Housing cycle sensitivity': 'Sensibilidad al ciclo inmobiliario',
+  'Raw material inflation': 'Inflación de materias primas',
+  'Policy changes on renewables': 'Cambios de política en renovables',
+  'Regulatory risk on drilling': 'Riesgo regulatorio en perforación',
+  'Rising interest rates': 'Subida de tipos de interés',
+  'Hyperscaler self-build risk': 'Riesgo de auto-construcción de hiperescaladores',
+  'Farm income decline': 'Caída de ingresos agrícolas',
+  'Precision ag adoption pace': 'Ritmo de adopción de agricultura de precisión',
+  'Semiconductor capex cyclicality': 'Ciclicidad del capex en semiconductores',
+  'Export control restrictions': 'Restricciones de control de exportaciones',
+  'Aerospace aftermarket risk': 'Riesgo del mercado de repuestos aeroespaciales',
+  'Capital project execution': 'Ejecución de proyectos de capital',
+  'EV adoption pace uncertainty': 'Incertidumbre en ritmo de adopción de EV',
+  'Industrial production slowdown': 'Desaceleración de producción industrial',
+  'Latin American economic risk': 'Riesgo económico latinoamericano',
+  'Regulatory changes': 'Cambios regulatorios',
+  'Small-cap execution risk': 'Riesgo de ejecución de small-cap',
+  'Defense contract dependency': 'Dependencia de contratos de defensa',
+  'Aerospace cycle risk': 'Riesgo del ciclo aeroespacial',
+  'Raw material cost volatility': 'Volatilidad de costes de materias primas',
+  'Analog cycle downturn': 'Caída del ciclo analógico',
+  'Capex ramp risk from new fabs': 'Riesgo de rampa de capex por nuevas fábricas',
+  'AWS competition from Azure/GCP': 'Competencia de Azure/GCP contra AWS',
+  'Retail margin compression': 'Compresión de márgenes minoristas',
+  'Automotive market weakness': 'Debilidad del mercado automotriz',
+  'GLP-1 impact on sleep apnea': 'Impacto de GLP-1 en apnea del sueño',
+  'Regulatory approval risk': 'Riesgo de aprobación regulatoria',
+  'Freight recession': 'Recesión del transporte de carga',
+  'Geopolitical Taiwan risk': 'Riesgo geopolítico de Taiwán',
+  'Capex intensity pressure': 'Presión de intensidad de capex',
+  'Labor market tightness': 'Estrechez del mercado laboral',
+  'Veterinary visit volume decline': 'Caída del volumen de visitas veterinarias',
+  'International expansion risk': 'Riesgo de expansión internacional',
+  'Supply chain bottlenecks': 'Cuellos de botella en cadena de suministro',
+  'Engine defect liabilities': 'Responsabilidades por defectos de motor',
+  'Construction cycle sensitivity': 'Sensibilidad al ciclo de construcción',
+  'Refrigerant regulation': 'Regulación de refrigerantes',
+  'Technology disruption from LEO competitors': 'Disrupción tecnológica de competidores LEO',
+  'Semiconductor analytics dependency': 'Dependencia de analíticas de semiconductores',
+  'Rare earth processing scale-up risk': 'Riesgo de escalado de procesamiento de tierras raras',
+  'Pharma R&D spending cuts': 'Recortes en gasto de I+D farmacéutico',
+  'China market uncertainty': 'Incertidumbre del mercado chino',
+  'Regulatory rate decisions': 'Decisiones regulatorias de tarifas',
+  'Capital-intensive grid modernization': 'Modernización de red intensiva en capital',
+  'Volume cyclicality': 'Ciclicidad de volumen',
+  'EV transition impact': 'Impacto de la transición a EV',
+  'Copper price volatility': 'Volatilidad del precio del cobre',
+  'Geopolitical risk in Indonesia': 'Riesgo geopolítico en Indonesia',
+  'Foundry price pressure': 'Presión en precios de fundición',
+  'Technology node limitations': 'Limitaciones de nodos tecnológicos',
+  'Demand normalization post-storms': 'Normalización de demanda post-tormentas',
+  'Clean energy transition': 'Transición a energía limpia',
+  'Carrier consolidation risk': 'Riesgo de consolidación de operadores',
+  'Japanese yen volatility': 'Volatilidad del yen japonés',
+  'Automation cycle downturn': 'Caída del ciclo de automatización',
+  'iPhone cycle maturation': 'Maduración del ciclo de iPhone',
+  'Regulatory antitrust pressure': 'Presión antimonopolio regulatoria',
+  'AI disruption of search': 'Disrupción de IA en búsquedas',
+  'Antitrust remedies risk': 'Riesgo de medidas antimonopolio',
+  'Environmental regulation costs': 'Costes de regulación medioambiental',
+  'Recycling commodity price swings': 'Oscilaciones de precios de reciclaje',
+  'Ansys integration risk': 'Riesgo de integración de Ansys',
+  'Cloud migration execution': 'Ejecución de migración a la nube',
+  'Hospital capital spending cuts': 'Recortes en inversión hospitalaria',
+  'Capital-intensive infrastructure': 'Infraestructura intensiva en capital',
+  'Display market cyclicality': 'Ciclicidad del mercado de pantallas',
+  'Optical fiber demand volatility': 'Volatilidad de demanda de fibra óptica',
+  'Wireless competition intensity': 'Intensidad de competencia inalámbrica',
+  'Spectrum cost escalation': 'Escalada de costes de espectro',
+  'Semiconductor industry downturn': 'Caída de la industria de semiconductores',
+  'AI disruption of chip design': 'Disrupción de IA en diseño de chips',
+  'Enterprise spending slowdown': 'Desaceleración del gasto empresarial',
+  'SD-WAN disruption': 'Disrupción de SD-WAN',
+  'Metaverse investment uncertainty': 'Incertidumbre en inversión del metaverso',
+  'Regulatory privacy restrictions': 'Restricciones regulatorias de privacidad',
+  'DOD pricing scrutiny': 'Escrutinio de precios del Departamento de Defensa',
+  'Aftermarket volume cyclicality': 'Ciclicidad del volumen de repuestos',
+  'Fintech disruption': 'Disrupción Fintech',
+  'Regulatory pressure on interchange fees': 'Presión regulatoria sobre tasas de intercambio',
+  'Index fund fee compression': 'Compresión de comisiones de fondos indexados',
+  'ESG backlash': 'Reacción negativa contra ESG',
+  'Cloud migration cannibalization': 'Canibalización por migración a la nube',
+  'Competition from Pure Storage': 'Competencia de Pure Storage',
+  'Integration risk from mergers': 'Riesgo de integración de fusiones',
+  'Membership fee resistance': 'Resistencia a cuotas de membresía',
+  'E-commerce competition': 'Competencia del comercio electrónico',
+  'AI monetization execution risk': 'Riesgo de ejecución de monetización de IA',
+  'Antitrust regulatory pressure': 'Presión regulatoria antimonopolio',
+  'Travel demand cyclicality': 'Ciclicidad de la demanda de viajes',
+  'Regulatory pressure in EU': 'Presión regulatoria en la UE',
+  'Turnaround execution risk': 'Riesgo de ejecución de reestructuración',
+  'Legacy business decline': 'Declive del negocio heredado',
+  'Regulatory pressure on fees': 'Presión regulatoria sobre comisiones',
+  'AI spending pullback': 'Retroceso del gasto en IA',
+  'Export restrictions to China': 'Restricciones de exportación a China',
+  'Regulatory scrutiny': 'Escrutinio regulatorio',
+  'Credit cycle downturn': 'Caída del ciclo crediticio',
+  'Consumer discretionary spending': 'Gasto discrecional del consumidor',
+  'Brand competition': 'Competencia de marcas',
+  'Government contract concentration': 'Concentración de contratos gubernamentales',
+  'High valuation risk': 'Riesgo de valoración elevada',
+  'Residential expansion execution': 'Ejecución de expansión residencial',
+  'Competition from Zillow': 'Competencia de Zillow',
+  'Lithium price volatility': 'Volatilidad del precio del litio',
+  'EV adoption pace uncertainty': 'Incertidumbre en ritmo de adopción de EV',
+  'EV competition intensifying': 'Intensificación de competencia en EV',
+  'Valuation premium risk': 'Riesgo de prima de valoración',
+  'Niche market cyclicality': 'Ciclicidad de mercado nicho',
+  'China operations risk': 'Riesgo de operaciones en China',
+  'Apple modem transition': 'Transición de módem de Apple',
+  'Smartphone market saturation': 'Saturación del mercado de smartphones',
+  'Defense contract concentration': 'Concentración de contratos de defensa',
+  'Battery storage competition': 'Competencia en almacenamiento de baterías',
+  'Project execution risk': 'Riesgo de ejecución de proyectos',
+  'Permitting and regulatory risk': 'Riesgo de permisos y regulatorio',
+  'Semiconductor cycle dependency': 'Dependencia del ciclo de semiconductores',
+  'Server margin compression': 'Compresión de márgenes de servidores',
+  'Cloud migration cannibalization': 'Canibalización por migración a la nube',
+  'Emerging robotic surgery competitors': 'Competidores emergentes en cirugía robótica',
+  'Capital-intensive infrastructure': 'Infraestructura intensiva en capital',
+  'Wireless competition intensity': 'Intensidad de competencia inalámbrica'
 };
 function translateRisk(text) {
-  return text.replace(/\b[A-Za-z-]+\b/g, w => {
-    const lower = w.toLowerCase();
-    if (RISK_DICT[lower]) return RISK_DICT[lower];
-    if (RISK_DICT[w]) return RISK_DICT[w];
-    return w;
-  }).replace(/^./, c => c.toUpperCase());
+  // Try full phrase match first
+  if (RISK_TRANSLATIONS[text]) return RISK_TRANSLATIONS[text];
+  // Return original if no translation found (risks are already descriptive)
+  return text;
 }
 
 // --- Section 7: News & Sentiment ---

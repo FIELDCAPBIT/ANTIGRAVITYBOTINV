@@ -1,5 +1,5 @@
 // AlphaFundamental — Batch Updater (node updater.js [--force])
-// Processes all tickers SEQUENTIALLY with 2s pauses, writes scores.json
+// Processes all tickers SEQUENTIALLY with long pauses, writes scores.json
 import fs from 'fs';
 import { TICKER_LIST, TICKERS_DATA, SECTOR_AVERAGES } from './js/tickers.js';
 import { calcAverage, calcDeviation } from './js/utils.js';
@@ -10,23 +10,33 @@ const FORCE = process.argv.includes('--force');
 const SCORES_FILE = './scores.json';
 const SKIP_HOURS = 6;
 
-// --- Yahoo Finance Auth (same as server.js) ---
-import yahooFinance from 'yahoo-finance2';
+// --- Yahoo Finance v3 ---
+import YahooFinance from 'yahoo-finance2';
+const yahooFinance = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
 
+// --- Rate-limited fetch with exponential backoff ---
+let lastRequestTime = 0;
+const MIN_GAP_MS = 3500;
 
+async function rateLimitedCall(fn) {
+  const now = Date.now();
+  const wait = Math.max(0, MIN_GAP_MS - (now - lastRequestTime));
+  if (wait > 0) await sleep(wait);
+  lastRequestTime = Date.now();
+  return fn();
+}
 
-async function yahooFetch(url, retries = 3) {
-  const [base, query] = url.split('?');
-  const params = new URLSearchParams(query);
-  const queryOpts = Object.fromEntries(params.entries());
-  
+async function withRetry(fn, retries = 4) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      return await yahooFinance._fetch(base, queryOpts, { needsCrumb: true });
+      return await fn();
     } catch (err) {
-      if ((err.message.includes('Too Many Requests') || err.message.includes('invalid json')) && attempt < retries) {
-        console.log(`    ⚠️ 429 Too Many Requests. Retrying in 30s... (Attempt ${attempt + 1}/${retries})`);
-        await sleep(30000);
+      const msg = String(err.message || err);
+      const isRateLimit = msg.includes('Too Many') || msg.includes('429') || msg.includes('invalid json') || msg.includes('Unexpected token');
+      if (isRateLimit && attempt < retries) {
+        const delay = Math.min(90000, 15000 * Math.pow(2, attempt));
+        console.log(`    ⚠️ Rate limited. Waiting ${delay/1000}s... (Attempt ${attempt + 1}/${retries})`);
+        await sleep(delay);
         continue;
       }
       throw err;
@@ -37,12 +47,16 @@ async function yahooFetch(url, retries = 3) {
 function raw(obj) { const v = obj?.raw ?? obj ?? null; return (typeof v === 'number' && isFinite(v)) ? v : null; }
 function safe(v) { return (v != null && isFinite(v) && !isNaN(v)) ? v : null; }
 
-// --- Fetch all data for one ticker (mirrors server.js logic) ---
+// --- Fetch all data for one ticker ---
 async function fetchTickerData(symbol) {
-  const modules = [
-    'assetProfile','financialData','defaultKeyStatistics','summaryDetail','price',
-    'recommendationTrend','calendarEvents','earningsTrend'
-  ].join(',');
+  // SEQUENTIAL: quoteSummary first, then timeseries
+  const r = await rateLimitedCall(() => withRetry(() =>
+    yahooFinance.quoteSummary(symbol, {
+      modules: ['assetProfile', 'financialData', 'defaultKeyStatistics', 'summaryDetail', 'price',
+        'recommendationTrend', 'calendarEvents', 'earningsTrend']
+    })
+  ));
+  if (!r) throw new Error('No data for ' + symbol);
 
   const tsTypes = [
     'annualTotalRevenue','annualOperatingIncome','annualNetIncome','annualNormalizedEBITDA',
@@ -54,13 +68,17 @@ async function fetchTickerData(symbol) {
   const period1 = Math.floor(Date.now() / 1000) - 6 * 365 * 86400;
   const period2 = Math.floor(Date.now() / 1000);
 
-  const [summaryData, tsData] = await Promise.all([
-    yahooFetch(`https://query2.finance.yahoo.com/v10/finance/quoteSummary/${symbol}?modules=${modules}`),
-    yahooFetch(`https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/${symbol}?type=${tsTypes}&period1=${period1}&period2=${period2}`)
-  ]);
-
-  const r = summaryData?.quoteSummary?.result?.[0];
-  if (!r) throw new Error('No data for ' + symbol);
+  let tsRawData = null;
+  try {
+    tsRawData = await rateLimitedCall(() => withRetry(() =>
+      yahooFinance._fetch(
+        `https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/${symbol}`,
+        { type: tsTypes, period1: String(period1), period2: String(period2) }
+      )
+    ));
+  } catch (e) {
+    console.log(`    ⚠️ TimeSeries unavailable for ${symbol}: ${e.message}`);
+  }
 
   const profile = r.assetProfile || {};
   const fd = r.financialData || {};
@@ -85,7 +103,6 @@ async function fetchTickerData(symbol) {
     pegRatio = trailingPE / (earningsGrowth * 100);
   }
 
-  // ROIC
   const roe = raw(fd.returnOnEquity);
   const totalDebt = raw(ks.totalDebt) || 0;
   const totalEquity = raw(ks.bookValue) ? raw(ks.bookValue) * (shares || 0) : null;
@@ -97,15 +114,14 @@ async function fetchTickerData(symbol) {
     else if (roe) roic = roe;
   }
 
-  // Net Debt/EBITDA
   let netDebtEbitda = null;
   const ebitda = raw(fd.ebitda);
   const totalCash = raw(fd.totalCash) || 0;
   if (ebitda && ebitda > 0) netDebtEbitda = (totalDebt - totalCash) / ebitda;
 
-  // Time series
-  const tsEntries = tsData?.timeseries?.result || [];
+  // Parse time series (raw _fetch format)
   const seriesMap = {};
+  const tsEntries = tsRawData?.timeseries?.result || [];
   for (const ts of tsEntries) {
     const key = ts.meta?.type?.[0];
     if (!key) continue;
@@ -157,9 +173,7 @@ async function fetchTickerData(symbol) {
       netDebtToEBITDA: hNDE, revenueGrowth: hRevG, forwardPE: hFPE, pegRatio: hPEG };
   });
 
-  // Analyst
   const recTrend = r.recommendationTrend?.trend || [];
-  const latest = recTrend.find(t => t.period === '0m') || recTrend[0] || {};
   const analystTargets = {
     targetMeanPrice: raw(fd.targetMeanPrice), targetHighPrice: raw(fd.targetHighPrice),
     targetLowPrice: raw(fd.targetLowPrice), targetMedianPrice: raw(fd.targetMedianPrice),
@@ -167,7 +181,6 @@ async function fetchTickerData(symbol) {
     recommendationMean: raw(fd.recommendationMean), recommendationKey: fd.recommendationKey || null
   };
 
-  // --- Earnings Quality ---
   let earningsQuality = null;
   if (sortedDates.length > 0) {
     const latestY = seriesMap[sortedDates[0]];
@@ -175,9 +188,9 @@ async function fetchTickerData(symbol) {
     const ocf = latestY.annualOperatingCashFlow;
     const fcfAnn = latestY.annualFreeCashFlow;
     const ta = latestY.annualTotalAssets;
-    let grade = 'media', score = 5;
     const ccr = (ni && ni !== 0 && fcfAnn != null) ? fcfAnn / ni : null;
     const accruals = (ni != null && ocf != null && ta && ta > 0) ? (ni - ocf) / ta : null;
+    let score = 5;
     if (ccr != null) {
       if (ccr > 0.85 && (accruals == null || accruals < 0.05)) score = 9;
       else if (ccr >= 0.60) score = 6;
@@ -186,7 +199,6 @@ async function fetchTickerData(symbol) {
     earningsQuality = { cashConversion: ccr, accrualsRatio: accruals, score };
   }
 
-  // --- Earnings Revisions ---
   let earningsRevisions = null;
   const et = r.earningsTrend;
   if (et && et.trend) {
@@ -198,13 +210,13 @@ async function fetchTickerData(symbol) {
       return {
         epsEst: raw(ee.avg), epsPrior30d: raw(ee['30daysAgo']), epsPrior90d: raw(ee['90daysAgo']),
         revEst: raw(re.avg), revPrior30d: raw(re['30daysAgo']),
-        numUp: ee.numberOfAnalystsUp?.raw || 0, numDown: ee.numberOfAnalystsDown?.raw || 0
+        numUp: ee.numberOfAnalystsUp?.raw || raw(ee.numberOfAnalystsUp) || 0,
+        numDown: ee.numberOfAnalystsDown?.raw || raw(ee.numberOfAnalystsDown) || 0
       };
     };
     const cyData = extract(cy);
     const epsRev30d = (cyData.epsEst && cyData.epsPrior30d && cyData.epsPrior30d !== 0) ? (cyData.epsEst - cyData.epsPrior30d) / Math.abs(cyData.epsPrior30d) : null;
     const epsRev90d = (cyData.epsEst && cyData.epsPrior90d && cyData.epsPrior90d !== 0) ? (cyData.epsEst - cyData.epsPrior90d) / Math.abs(cyData.epsPrior90d) : null;
-    const revRev30d = (cyData.revEst && cyData.revPrior30d && cyData.revPrior30d !== 0) ? (cyData.revEst - cyData.revPrior30d) / Math.abs(cyData.revPrior30d) : null;
     const ratio = (cyData.numUp + cyData.numDown > 0) ? cyData.numUp / (cyData.numUp + cyData.numDown) : null;
     let score = 5;
     if (epsRev30d != null) { if (epsRev30d > 0.02) score += 1.5; else if (epsRev30d < -0.02) score -= 1.5; }
@@ -236,29 +248,29 @@ async function fetchTickerData(symbol) {
   };
 }
 
-/// --- Inline analysis (reuses exact scoring logic from analysis.js) ---
 function runScoring(ticker, apiData) {
   const result = runAnalysis(ticker, apiData);
   if (!result) return null;
-
+  const h = result.historical; // NOT result.hist
+  const ctx = result.context;
+  const entryPrice = result.thesis?.entryPrice;
   return {
     ticker, company_name: result.meta.name, sector: result.meta.sector,
-    current_price: result.meta.price, market_cap: result.meta.marketCap,
+    current_price: ctx.price, market_cap: ctx.mktCap,
     alpha_score: result.scoring.alphaScore, verdict: result.scoring.verdict, moat_rating: result.moat.rating,
-    pe_ratio: result.hist.current.pe, forward_pe: result.hist.current.forwardPE,
-    roic: result.hist.current.roic != null ? parseFloat((result.hist.current.roic * 100).toFixed(1)) : null,
-    operating_margin: result.hist.current.opMargin != null ? parseFloat((result.hist.current.opMargin * 100).toFixed(1)) : null,
-    revenue_growth: result.hist.current.revGrowth,
+    pe_ratio: h.current.pe, forward_pe: h.current.forwardPE,
+    roic: h.current.roic != null ? parseFloat((h.current.roic * 100).toFixed(1)) : null,
+    operating_margin: h.current.opMargin != null ? parseFloat((h.current.opMargin * 100).toFixed(1)) : null,
+    revenue_growth: h.current.revGrowth,
     analyst_target: result.analyst.targetMean,
     upside_potential: result.analyst.upside != null ? parseFloat((result.analyst.upside * 100).toFixed(1)) : null,
-    entry_price: result.entryPrice ? parseFloat(result.entryPrice.toFixed(2)) : null,
-    week52_high: result.techData?.week52High || null, week52_low: result.techData?.week52Low || null,
-    last_updated: new Date().toISOString(),
-    error_flag: false
+    entry_price: entryPrice ? parseFloat(entryPrice.toFixed(2)) : null,
+    week52_high: result.techData?.week52High || result.techData?.high52w || null,
+    week52_low: result.techData?.week52Low || result.techData?.low52w || null,
+    last_updated: new Date().toISOString(), error_flag: false
   };
 }
 
-// --- Main ---
 async function main() {
   console.log('\n  ╔═══════════════════════════════════════════╗');
   console.log('  ║  AlphaFundamental — Batch Score Updater   ║');
@@ -266,9 +278,6 @@ async function main() {
   console.log(`  Mode: ${FORCE ? '--force (actualizar todas)' : 'incremental (skip < 6h)'}`);
   console.log(`  Tickers: ${TICKER_LIST.length}\n`);
 
-
-
-  // Load existing scores
   let existing = {};
   if (fs.existsSync(SCORES_FILE)) {
     try {
@@ -285,7 +294,6 @@ async function main() {
     const t = TICKER_LIST[i];
     const num = `${i + 1}/${TICKER_LIST.length}`;
 
-    // Skip if recently updated
     if (!FORCE && existing[t.ticker] && !existing[t.ticker].error_flag) {
       const lastUp = new Date(existing[t.ticker].last_updated).getTime();
       if (Date.now() - lastUp < SKIP_HOURS * 3600 * 1000) {
@@ -302,7 +310,7 @@ async function main() {
       results.push(scored);
       okCount++;
       console.log(`  ${num}: ${t.ticker} ✓ — Score: ${scored.alpha_score.toFixed(1)} (${scored.verdict})`);
-      await sleep(7000);
+      await sleep(8000);
     } catch (err) {
       errCount++;
       results.push({
@@ -314,13 +322,11 @@ async function main() {
         last_updated: new Date().toISOString(), error_flag: true
       });
       console.log(`  ${num}: ${t.ticker} ✗ — Error: ${err.message}`);
-      await sleep(3000);
+      await sleep(5000);
     }
   }
 
-  // Sort by score desc
   results.sort((a, b) => b.alpha_score - a.alpha_score);
-
   const output = {
     last_updated: new Date().toISOString(),
     total_processed: results.length,
@@ -329,7 +335,6 @@ async function main() {
   };
 
   fs.writeFileSync(SCORES_FILE, JSON.stringify(output, null, 2));
-
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
   const mins = Math.floor(elapsed / 60);
   const secs = elapsed % 60;

@@ -1,4 +1,4 @@
-// AlphaFundamental v2.0 — Express Server with Yahoo Finance API
+// AlphaFundamental v2.0 — Express Server with Yahoo Finance API (v3)
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
@@ -11,23 +11,54 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// --- Yahoo Finance Auth ---
-import yahooFinance from 'yahoo-finance2';
+// --- Yahoo Finance v3 ---
+import YahooFinance from 'yahoo-finance2';
+const yahooFinance = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
 
+// --- Global Rate Limiter: max 1 request at a time, min 2.5s gap ---
+let lastRequestTime = 0;
+const MIN_GAP_MS = 2500;
+const requestQueue = [];
+let isProcessingQueue = false;
 
+function enqueueYahooCall(fn) {
+  return new Promise((resolve, reject) => {
+    requestQueue.push({ fn, resolve, reject });
+    if (!isProcessingQueue) processQueue();
+  });
+}
 
-async function yahooFetch(url, retries = 3) {
-  const [base, query] = url.split('?');
-  const params = new URLSearchParams(query);
-  const queryOpts = Object.fromEntries(params.entries());
-  
+async function processQueue() {
+  if (isProcessingQueue) return;
+  isProcessingQueue = true;
+  while (requestQueue.length > 0) {
+    const { fn, resolve, reject } = requestQueue.shift();
+    const now = Date.now();
+    const wait = Math.max(0, MIN_GAP_MS - (now - lastRequestTime));
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    lastRequestTime = Date.now();
+    try {
+      const result = await fn();
+      resolve(result);
+    } catch (err) {
+      reject(err);
+    }
+  }
+  isProcessingQueue = false;
+}
+
+// --- Retry wrapper with exponential backoff ---
+async function withRetry(fn, retries = 4) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      return await yahooFinance._fetch(base, queryOpts, { needsCrumb: true });
+      return await fn();
     } catch (err) {
-      if ((err.message.includes('Too Many Requests') || err.message.includes('invalid json')) && attempt < retries) {
-        console.log(`⚠️ 429 Too Many Requests. Retrying in 4s... (Attempt ${attempt + 1}/${retries})`);
-        await new Promise(r => setTimeout(r, 4000));
+      const msg = String(err.message || err);
+      const isRateLimit = msg.includes('Too Many') || msg.includes('429') || msg.includes('invalid json') || msg.includes('Unexpected token');
+      if (isRateLimit && attempt < retries) {
+        const delay = Math.min(60000, 8000 * Math.pow(2, attempt));
+        console.log(`  ⚠️ Rate limited. Waiting ${delay/1000}s... (Attempt ${attempt + 1}/${retries})`);
+        await new Promise(r => setTimeout(r, delay));
         continue;
       }
       throw err;
@@ -35,8 +66,84 @@ async function yahooFetch(url, retries = 3) {
   }
 }
 
-// Serve static files (no-cache for JS/CSS during dev)
-app.use(express.static(path.join(__dirname), { 
+// --- In-memory cache with TTL ---
+const cache = new Map();
+const CACHE_TTL = 15 * 60 * 1000; // 15 minutes
+
+function getCached(key) {
+  const entry = cache.get(key);
+  if (entry && Date.now() - entry.ts < CACHE_TTL) return entry.data;
+  return null;
+}
+function setCache(key, data) {
+  cache.set(key, { data, ts: Date.now() });
+}
+
+// --- Safe Yahoo Finance calls ---
+async function fetchQuoteSummary(symbol) {
+  const cacheKey = `summary_${symbol}`;
+  const cached = getCached(cacheKey);
+  if (cached) return cached;
+
+  const modules = ['assetProfile', 'financialData', 'defaultKeyStatistics', 'summaryDetail', 'price',
+    'recommendationTrend', 'institutionOwnership', 'insiderHolders',
+    'netSharePurchaseActivity', 'calendarEvents', 'earningsTrend'];
+
+  const result = await enqueueYahooCall(() => withRetry(() =>
+    yahooFinance.quoteSummary(symbol, { modules })
+  ));
+  setCache(cacheKey, result);
+  return result;
+}
+
+async function fetchTimeSeries(symbol) {
+  const cacheKey = `ts_${symbol}`;
+  const cached = getCached(cacheKey);
+  if (cached) return cached;
+
+  const tsTypes = [
+    'annualTotalRevenue', 'annualOperatingIncome', 'annualNetIncome', 'annualNormalizedEBITDA',
+    'annualFreeCashFlow', 'annualOperatingCashFlow', 'annualCapitalExpenditure',
+    'annualStockholdersEquity', 'annualLongTermDebt', 'annualTotalDebt',
+    'annualCashAndCashEquivalents', 'annualTotalAssets'
+  ].join(',');
+
+  const period1 = Math.floor(Date.now() / 1000) - 6 * 365 * 86400;
+  const period2 = Math.floor(Date.now() / 1000);
+
+  try {
+    // Use raw _fetch with query1 (not query2) for annual timeseries data
+    const result = await enqueueYahooCall(() => withRetry(() =>
+      yahooFinance._fetch(
+        `https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/${symbol}`,
+        { type: tsTypes, period1: String(period1), period2: String(period2) }
+      )
+    ));
+    setCache(cacheKey, result);
+    return result;
+  } catch (e) {
+    console.log(`  ⚠️ TimeSeries fallback for ${symbol}: ${e.message}`);
+    return null;
+  }
+}
+
+async function fetchChartData(symbol, range = '3y') {
+  const cacheKey = `chart_${symbol}_${range}`;
+  const cached = getCached(cacheKey);
+  if (cached) return cached;
+
+  const period1 = new Date();
+  period1.setFullYear(period1.getFullYear() - (range === '1y' ? 1 : 3));
+
+  const result = await enqueueYahooCall(() => withRetry(() =>
+    yahooFinance.chart(symbol, { period1, interval: '1wk' })
+  ));
+  setCache(cacheKey, result);
+  return result;
+}
+
+// Serve static files
+app.use(express.static(path.join(__dirname), {
   setHeaders: (res, filePath) => {
     if (filePath.endsWith('.js') || filePath.endsWith('.css') || filePath.endsWith('.html')) {
       res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
@@ -50,29 +157,13 @@ function raw(obj) { const v = obj?.raw ?? obj ?? null; return (typeof v === 'num
 app.get('/api/fundamentals/:symbol', async (req, res) => {
   const symbol = req.params.symbol.toUpperCase();
   try {
-    const modules = [
-      'assetProfile', 'financialData', 'defaultKeyStatistics', 'summaryDetail', 'price',
-      'recommendationTrend', 'institutionOwnership', 'insiderHolders',
-      'netSharePurchaseActivity', 'calendarEvents', 'earningsTrend'
-    ].join(',');
-
-    const tsTypes = [
-      'annualTotalRevenue', 'annualOperatingIncome', 'annualNetIncome', 'annualNormalizedEBITDA',
-      'annualFreeCashFlow', 'annualOperatingCashFlow', 'annualCapitalExpenditure',
-      'annualStockholdersEquity', 'annualLongTermDebt', 'annualTotalDebt',
-      'annualCashAndCashEquivalents', 'annualTotalAssets'
-    ].join(',');
-
-    const period1 = Math.floor(Date.now() / 1000) - 6 * 365 * 86400;
-    const period2 = Math.floor(Date.now() / 1000);
-
-    const [summaryData, tsData] = await Promise.all([
-      yahooFetch(`https://query2.finance.yahoo.com/v10/finance/quoteSummary/${symbol}?modules=${modules}`),
-      yahooFetch(`https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/${symbol}?type=${tsTypes}&period1=${period1}&period2=${period2}`)
-    ]);
-
-    const r = summaryData?.quoteSummary?.result?.[0];
+    // SEQUENTIAL requests to avoid 429
+    console.log(`  📊 [1/4] ${symbol} — quoteSummary...`);
+    const r = await fetchQuoteSummary(symbol);
     if (!r) throw new Error('No data returned for ' + symbol);
+
+    console.log(`  📊 [2/4] ${symbol} — timeSeries...`);
+    const tsRawData = await fetchTimeSeries(symbol);
 
     const profile = r.assetProfile || {};
     const fd = r.financialData || {};
@@ -95,23 +186,35 @@ app.get('/api/fundamentals/:symbol', async (req, res) => {
     let pegRatio = raw(sd.pegRatio) || raw(ks.pegRatio);
     const revenueGrowth = raw(fd.revenueGrowth);
     const earningsGrowth = raw(fd.earningsGrowth);
-    const forwardEps = raw(ks.forwardEps);
-    // Fallback PEG: PE / (earnings growth % as whole number) if Yahoo doesn't provide it
     if (!pegRatio && trailingPE && earningsGrowth && earningsGrowth > 0.01) {
       pegRatio = trailingPE / (earningsGrowth * 100);
     }
 
-    // --- Parse timeSeries ---
-    const tsResults = tsData?.timeseries?.result || [];
+    // --- Parse timeSeries (v3 returns array of objects) ---
     const seriesMap = {};
-    for (const s of tsResults) {
-      const key = s.meta?.type?.[0];
-      if (!key) continue;
-      for (const e of (s[key] || [])) {
-        const date = e.asOfDate;
+    if (Array.isArray(tsRawData)) {
+      for (const entry of tsRawData) {
+        const date = entry.date || entry.asOfDate;
         if (!date) continue;
-        if (!seriesMap[date]) seriesMap[date] = {};
-        seriesMap[date][key] = e.reportedValue?.raw;
+        const dateKey = typeof date === 'string' ? date : date.toISOString().split('T')[0];
+        if (!seriesMap[dateKey]) seriesMap[dateKey] = {};
+        for (const [k, v] of Object.entries(entry)) {
+          if (k !== 'date' && k !== 'asOfDate' && k !== 'symbol' && v != null) {
+            seriesMap[dateKey][k] = typeof v === 'object' ? (v.raw ?? v) : v;
+          }
+        }
+      }
+    } else if (tsRawData?.timeseries?.result) {
+      // Fallback for raw _fetch format
+      for (const s of tsRawData.timeseries.result) {
+        const key = s.meta?.type?.[0];
+        if (!key) continue;
+        for (const e of (s[key] || [])) {
+          const date = e.asOfDate;
+          if (!date) continue;
+          if (!seriesMap[date]) seriesMap[date] = {};
+          seriesMap[date][key] = e.reportedValue?.raw;
+        }
       }
     }
     const sortedDates = Object.keys(seriesMap).sort().reverse().slice(0, 5);
@@ -136,9 +239,6 @@ app.get('/api/fundamentals/:symbol', async (req, res) => {
       if (ebitda && ebitda > 0) netDebtEbitda = (debt - cash) / ebitda;
     }
 
-    // Compute historical revenue growth YoY
-    const revenuesByDate = sortedDates.map(d => ({ date: d, rev: seriesMap[d]?.annualTotalRevenue }));
-
     const historicalRatios = sortedDates.map((date, idx) => {
       const y = seriesMap[date];
       const rev = y.annualTotalRevenue;
@@ -160,24 +260,17 @@ app.get('/api/fundamentals/:symbol', async (req, res) => {
       const hEvEbitda = ebitda && ebitda > 0 && ev ? ev / ebitda : null;
       const hNetDebtEbitda = ebitda && ebitda > 0 ? (debt - cash) / ebitda : null;
 
-      // Revenue growth YoY
       let hRevGrowth = null;
       if (idx < sortedDates.length - 1) {
         const prevRev = seriesMap[sortedDates[idx + 1]]?.annualTotalRevenue;
         if (rev && prevRev && prevRev > 0) hRevGrowth = (rev - prevRev) / prevRev;
       }
-
-      // Earnings growth YoY (for Forward PE and PEG approximation)
       let hEarningsGrowth = null;
       if (idx < sortedDates.length - 1) {
         const prevNI = seriesMap[sortedDates[idx + 1]]?.annualNetIncome;
         if (netInc && prevNI && prevNI > 0) hEarningsGrowth = (netInc - prevNI) / prevNI;
       }
-
-      // Forward PE approximation: PE / (1 + earningsGrowth)
       const hForwardPE = hPE && hEarningsGrowth && hEarningsGrowth > -0.5 ? hPE / (1 + hEarningsGrowth) : null;
-
-      // PEG = trailing PE / (earnings growth % expressed as whole number)
       const hPEG = hPE && hEarningsGrowth && hEarningsGrowth > 0.01 ? hPE / (hEarningsGrowth * 100) : null;
 
       return { date, priceToEarningsRatio: hPE, priceToFreeCashFlowRatio: hPFCF,
@@ -198,9 +291,9 @@ app.get('/api/fundamentals/:symbol', async (req, res) => {
     }));
 
     const cal = r.calendarEvents || {};
-    const earningsDate = cal.earnings?.earningsDate?.[0]?.fmt || null;
-    const dividendDate = cal.dividendDate?.fmt || null;
-    const exDividendDate = cal.exDividendDate?.fmt || null;
+    const earningsDate = cal.earnings?.earningsDate?.[0]?.fmt || (cal.earnings?.earningsDate?.[0] ? new Date(cal.earnings.earningsDate[0]).toISOString().split('T')[0] : null);
+    const dividendDate = cal.dividendDate?.fmt || (cal.dividendDate ? new Date(cal.dividendDate).toISOString().split('T')[0] : null);
+    const exDividendDate = cal.exDividendDate?.fmt || (cal.exDividendDate ? new Date(cal.exDividendDate).toISOString().split('T')[0] : null);
 
     // --- Institutional & Insider ---
     const institutions = (r.institutionOwnership?.ownershipList || []).slice(0, 10).map(i => ({
@@ -219,68 +312,59 @@ app.get('/api/fundamentals/:symbol', async (req, res) => {
     // --- Technical: fetch chart data ---
     let technicals = null;
     try {
-      const chartData = await yahooFetch(`https://query2.finance.yahoo.com/v8/finance/chart/${symbol}?range=3y&interval=1wk`);
-      const chart = chartData?.chart?.result?.[0];
-      if (chart) {
-        const closes = chart.indicators?.quote?.[0]?.close || [];
-        const timestamps = chart.timestamp || [];
-        const validCloses = closes.filter(c => c != null);
-        const len = validCloses.length;
-
-        const high52w = Math.max(...validCloses.slice(-52));
-        const low52w = Math.min(...validCloses.slice(-52).filter(c => c > 0));
-        const currentClose = validCloses[len - 1] || price;
-
-        // SMAs
-        const sma100d = len >= 20 ? validCloses.slice(-20).reduce((a, b) => a + b, 0) / 20 : null; // ~20 weeks ≈ 100 days
-        const sma200d = len >= 40 ? validCloses.slice(-40).reduce((a, b) => a + b, 0) / 40 : null; // ~40 weeks ≈ 200 days
-
-        // Returns
-        const ret1y = len >= 52 ? (currentClose / validCloses[len - 52] - 1) : null;
-        const ret3y = len >= 156 ? (currentClose / validCloses[len - 156] - 1) : null;
-        const ret1w = len >= 2 ? (currentClose / validCloses[len - 2] - 1) : null;
-
-        // Support/Resistance using pivot points (classic floor pivot)
-        const last52 = validCloses.slice(-52);
-        const pivotHigh = Math.max(...last52);
-        const pivotLow = Math.min(...last52.filter(c => c > 0));
-        const pivotClose = currentClose;
-        const pivot = (pivotHigh + pivotLow + pivotClose) / 3;
-        const support1 = 2 * pivot - pivotHigh;   // S1
-        const support2 = pivot - (pivotHigh - pivotLow); // S2
-        const resistance1 = 2 * pivot - pivotLow;  // R1
-        const resistance2 = pivot + (pivotHigh - pivotLow); // R2
-        // Pick closest support below price, closest resistance above
-        const support = currentClose > support1 ? support1 : support2;
-        const resistance = currentClose < resistance1 ? resistance1 : resistance2;
-
-        // RSI (14 periods on weekly)
-        let rsi = null;
-        if (len >= 15) {
-          let gains = 0, losses = 0;
-          const recent = validCloses.slice(-15);
-          for (let i = 1; i < recent.length; i++) {
-            const diff = recent[i] - recent[i - 1];
-            if (diff > 0) gains += diff; else losses -= diff;
+      console.log(`  📊 [3/4] ${symbol} — chart...`);
+      const chartData = await fetchChartData(symbol, '3y');
+      if (chartData && chartData.quotes) {
+        const closes = chartData.quotes.map(q => q.close).filter(c => c != null);
+        const len = closes.length;
+        if (len > 0) {
+          const high52w = Math.max(...closes.slice(-52));
+          const low52w = Math.min(...closes.slice(-52).filter(c => c > 0));
+          const currentClose = closes[len - 1] || price;
+          const sma100d = len >= 20 ? closes.slice(-20).reduce((a, b) => a + b, 0) / 20 : null;
+          const sma200d = len >= 40 ? closes.slice(-40).reduce((a, b) => a + b, 0) / 40 : null;
+          const ret1y = len >= 52 ? (currentClose / closes[len - 52] - 1) : null;
+          const ret3y = len >= 156 ? (currentClose / closes[len - 156] - 1) : null;
+          const ret1w = len >= 2 ? (currentClose / closes[len - 2] - 1) : null;
+          const last52 = closes.slice(-52);
+          const pivotHigh = Math.max(...last52);
+          const pivotLow = Math.min(...last52.filter(c => c > 0));
+          const pivot = (pivotHigh + pivotLow + currentClose) / 3;
+          const support1 = 2 * pivot - pivotHigh;
+          const support2 = pivot - (pivotHigh - pivotLow);
+          const resistance1 = 2 * pivot - pivotLow;
+          const resistance2 = pivot + (pivotHigh - pivotLow);
+          const support = currentClose > support1 ? support1 : support2;
+          const resistance = currentClose < resistance1 ? resistance1 : resistance2;
+          let rsi = null;
+          if (len >= 15) {
+            let gains = 0, losses = 0;
+            const recent = closes.slice(-15);
+            for (let i = 1; i < recent.length; i++) {
+              const diff = recent[i] - recent[i - 1];
+              if (diff > 0) gains += diff; else losses -= diff;
+            }
+            const avgGain = gains / 14, avgLoss = losses / 14;
+            rsi = avgLoss === 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss));
           }
-          const avgGain = gains / 14, avgLoss = losses / 14;
-          rsi = avgLoss === 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss));
+          technicals = { high52w, low52w, sma100d, sma200d, ret1y, ret3y, ret1w, support, resistance, pivot, rsi, currentClose };
         }
-
-        technicals = { high52w, low52w, sma100d, sma200d, ret1y, ret3y, ret1w, support, resistance, pivot, rsi, currentClose };
       }
     } catch (e) { console.log(`  Technical data unavailable for ${symbol}:`, e.message); }
 
-    // --- SPY benchmark ---
+    // --- SPY benchmark (cached aggressively: 30min) ---
     let spyReturn1y = null;
     try {
-      const spyData = await yahooFetch(`https://query2.finance.yahoo.com/v8/finance/chart/SPY?range=1y&interval=1wk`);
-      const spyCloses = spyData?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(c => c != null) || [];
-      if (spyCloses.length >= 52) spyReturn1y = spyCloses[spyCloses.length - 1] / spyCloses[spyCloses.length - 52] - 1;
-      else if (spyCloses.length >= 2) spyReturn1y = spyCloses[spyCloses.length - 1] / spyCloses[0] - 1;
+      console.log(`  📊 [4/4] SPY benchmark...`);
+      const spyData = await fetchChartData('SPY', '1y');
+      if (spyData && spyData.quotes) {
+        const spyCloses = spyData.quotes.map(q => q.close).filter(c => c != null);
+        if (spyCloses.length >= 52) spyReturn1y = spyCloses[spyCloses.length - 1] / spyCloses[spyCloses.length - 52] - 1;
+        else if (spyCloses.length >= 2) spyReturn1y = spyCloses[spyCloses.length - 1] / spyCloses[0] - 1;
+      }
     } catch (e) { /* ignore */ }
 
-    // --- Earnings Quality (from timeSeries) ---
+    // --- Earnings Quality ---
     let earningsQuality = null;
     if (sortedDates.length > 0) {
       const latest = seriesMap[sortedDates[0]];
@@ -295,7 +379,7 @@ app.get('/api/fundamentals/:symbol', async (req, res) => {
       };
     }
 
-    // --- Earnings Revisions (from earningsTrend module) ---
+    // --- Earnings Revisions ---
     let earningsRevisions = null;
     const et = r.earningsTrend;
     if (et && et.trend) {
@@ -312,8 +396,8 @@ app.get('/api/fundamentals/:symbol', async (req, res) => {
           revEst: raw(re.avg), revPrior7d: raw(re['7daysAgo']),
           revPrior30d: raw(re['30daysAgo']), revPrior90d: raw(re['90daysAgo']),
           epsGrowth: raw(ee.growth),
-          numUp: ee.numberOfAnalystsUp?.raw || 0,
-          numDown: ee.numberOfAnalystsDown?.raw || 0
+          numUp: ee.numberOfAnalystsUp?.raw || raw(ee.numberOfAnalystsUp) || 0,
+          numDown: ee.numberOfAnalystsDown?.raw || raw(ee.numberOfAnalystsDown) || 0
         };
       };
       earningsRevisions = {
@@ -352,6 +436,7 @@ app.get('/api/fundamentals/:symbol', async (req, res) => {
       earningsQuality, earningsRevisions
     };
 
+    console.log(`  ✅ ${symbol} — data served successfully`);
     res.json(result);
   } catch (e) {
     console.error(`Error for ${symbol}:`, e.message);
@@ -359,21 +444,24 @@ app.get('/api/fundamentals/:symbol', async (req, res) => {
   }
 });
 
-// --- News Search for Weekly Alert ---
+// --- News Search ---
 app.get('/api/news/:symbol', async (req, res) => {
   try {
-    await ensureCrumb();
     const symbol = req.params.symbol.toUpperCase();
-    const searchRes = await fetch(`https://query2.finance.yahoo.com/v1/finance/search?q=${symbol}&newsCount=5&quotesCount=0&listsCount=0`, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Cookie': yfCookies }
-    });
-    if (!searchRes.ok) throw new Error('News search failed');
-    const data = await searchRes.json();
-    const news = (data.news || []).slice(0, 5).map(n => ({
+    const cacheKey = `news_${symbol}`;
+    const cached = getCached(cacheKey);
+    if (cached) return res.json(cached);
+
+    const searchResult = await enqueueYahooCall(() => withRetry(() =>
+      yahooFinance.search(symbol, { newsCount: 5, quotesCount: 0 })
+    ));
+    const news = (searchResult.news || []).slice(0, 5).map(n => ({
       title: n.title, publisher: n.publisher, link: n.link,
       publishedAt: n.providerPublishTime ? new Date(n.providerPublishTime * 1000).toISOString() : null
     }));
-    res.json({ news });
+    const result = { news };
+    setCache(cacheKey, result);
+    res.json(result);
   } catch (e) { res.json({ news: [] }); }
 });
 

@@ -14,8 +14,7 @@ async function loadScores() {
     const data = await res.json();
     if (!data.exists) { 
       $('onboarding').style.display = 'flex'; $('dash-content').style.display = 'none'; 
-      // Auto-start if no data exists
-      setTimeout(() => $('refresh-btn').click(), 1000);
+      // Manual refresh only — no auto-start to avoid rate limits
       return; 
     }
     allData = data;
@@ -31,10 +30,9 @@ async function loadScores() {
     renderCharts(valid);
     populateSectorFilter(data.companies);
     
-    // Auto-refresh if older than 4 hours
+    // Auto-refresh disabled — manual only to respect Yahoo Finance rate limits
     if (Date.now() - d.getTime() > 4 * 60 * 60 * 1000) {
-      console.log('Datos antiguos, auto-actualizando...');
-      setTimeout(() => { $('refresh-btn').click(); }, 1500);
+      console.log('Datos antiguos (>4h). Haz clic en "Actualizar Datos" para refrescar.');
     }
   } catch (e) { console.error('Failed to load scores:', e); }
 }
@@ -189,20 +187,21 @@ function renderCharts(companies) {
     options: { indexAxis: 'y', responsive: true, plugins: { legend: { display: false } }, scales: { x: { min: 0, max: 10, grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#64748b' } }, y: { grid: { display: false }, ticks: { color: '#94a3b8', font: { size: 11 } } } } }
   });
 
-  // 2. Oportunidades de Entrada
-  const withEntry = companies.filter(c => c.entry_price && c.current_price && c.alpha_score >= 4)
-    .map(c => ({ ...c, gap: ((c.current_price - c.entry_price) / c.entry_price) * 100 }))
+  // 2. Oportunidades de Entrada — stocks closest to their suggested entry price
+  const withEntry = companies.filter(c => c.entry_price && c.current_price && c.alpha_score >= 4 && c.entry_price < c.current_price)
+    .map(c => ({ ...c, gap: ((c.current_price - c.entry_price) / c.current_price) * 100 }))
     .sort((a, b) => a.gap - b.gap).slice(0, 10);
 
   const entryEl = $('chart-entry-content');
   if (entryEl) {
     entryEl.innerHTML = withEntry.map(c => {
-      const col = c.gap <= 5 ? 'var(--accent)' : c.gap <= 15 ? 'var(--gold)' : 'var(--red)';
+      const col = c.gap <= 10 ? 'var(--accent)' : c.gap <= 25 ? 'var(--gold)' : 'var(--text-muted)';
+      const barW = Math.min(100, c.gap);
       return `<div class="range52-row">
         <a href="index.html?ticker=${c.ticker}" class="range52-ticker" style="text-decoration:none;color:var(--text);font-weight:600;display:inline-block;cursor:pointer;">${c.ticker}</a>
         <div class="range52-bar-wrap" style="position:relative;background:rgba(255,255,255,0.05);height:20px;border-radius:4px;overflow:hidden;flex:1;cursor:pointer;" onclick="window.location.href='index.html?ticker=${c.ticker}'">
-          <div style="position:absolute;left:0;top:0;height:100%;background:${col}99;border-right:2px solid ${col};width:${Math.min(100, c.gap)}%;"></div>
-          <div style="position:absolute;left:8px;top:50%;transform:translateY(-50%);font-size:11px;font-weight:600;">${c.gap.toFixed(1)}% sobre entrada</div>
+          <div style="position:absolute;left:0;top:0;height:100%;background:${col}99;border-right:2px solid ${col};width:${barW}%;"></div>
+          <div style="position:absolute;left:8px;top:50%;transform:translateY(-50%);font-size:11px;font-weight:600;">$${c.current_price.toFixed(0)} → entrada $${c.entry_price.toFixed(0)} (${c.gap.toFixed(1)}% sobre entrada)</div>
         </div>
       </div>`;
     }).join('');
